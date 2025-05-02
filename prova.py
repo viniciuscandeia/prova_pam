@@ -7,10 +7,28 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 from sklearn.feature_selection import SelectKBest, mutual_info_classif
 from sklearn.preprocessing import LabelEncoder
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.feature_selection import SelectFromModel
-from sklearn.feature_selection import RFECV  # Recursive Feature Elimination with Cross-Validation
-from sklearn.model_selection import StratifiedKFold  # Estratégia de validação cruzadas
+from sklearn.feature_selection import RFECV
+from sklearn.model_selection import cross_val_predict
+from sklearn.metrics import confusion_matrix
+import time
+from sklearn.decomposition import PCA
+from sklearn.pipeline import Pipeline
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.svm import SVC
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.neural_network import MLPClassifier
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from sklearn.model_selection import cross_val_score
+from sklearn.cluster import KMeans, AgglomerativeClustering
+from scipy.cluster.hierarchy import dendrogram, linkage
+from sklearn.metrics import silhouette_score, davies_bouldin_score, calinski_harabasz_score
+from sklearn.metrics import adjusted_rand_score
+from sklearn.model_selection import StratifiedKFold, train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.feature_selection import RFE
+
 #%%
 df = pd.read_csv( 'radiomic_data.csv' )
 df.shape
@@ -109,1457 +127,1032 @@ columns_to_drop.extend( constant_columns )
 df = df.drop( columns = columns_to_drop )
 df.shape
 #%% md
-# ### 1.4.3 Análise de Correlação
-# 
-# Aqui será aplicada uma técnica de remoção de variáveis altamente correlacionadas entre si, baseada em análise de correlação entre features numéricas.
-# 
-# Ideia principal
-# - Se duas variáveis têm correlação muito alta (ex: > 0.9), elas transmitem praticamente a mesma informação.
-# - Manter ambas pode ser redundante e até prejudicial para o modelo.
-# - Eliminar uma das duas ajuda a simplificar o modelo sem perda significativa de desempenho.
-#%%
-# Separando as features (X) da variável alvo (y)
-X = df.drop( columns = [ target_column_name ] )
-y = df[ target_column_name ]
-
-# Pegando as colunas numéricas de X
-numeric_cols = X.select_dtypes( include = np.number ).columns.tolist()
-#%%
-# --- Dicionário para armazenar resultados X para comparação ---
-datasets_X = { }
-n_features = { }
-datasets_X[ 'Baseline' ] = X.to_numpy()  # Adicionar baseline codificado
-n_features[ 'Baseline' ] = X.shape[ 1 ]
-#%%
-# Calculando matriz de correlação
-correlation_matrix = X[ numeric_cols ].corr()
-
-# Plotando o resultado
-# plt.figure( figsize = (8, 6) )
-# sns.heatmap( correlation_matrix, cmap = 'coolwarm', annot = False )
-# plt.title( 'Matriz de Correlação Feature-Feature' )
-# plt.show()
-#%% md
-# # **TESTAR OUTRAS ESTRATÉGIAS**
-#%%
-# Limiar de correlação absoluta
-correlation_threshold = 0.9
-
-# Encontrar pares de features com correlação acima do limiar
-# Usamos o triângulo superior da matriz para evitar pares duplicados (A,B) e (B,A)
-# e correlação de uma feature com ela mesma (diagonal = 1)
-upper_triangle = correlation_matrix.where( np.triu( np.ones( correlation_matrix.shape ), k = 1 ).astype( bool ) )
-
-# Encontrar colunas a serem removidas
-columns_to_drop = set()
-for i in range( len( upper_triangle.columns ) ):
-    for j in range( i ):
-        if abs( upper_triangle.iloc[ j, i ] ) > correlation_threshold:
-            colname_i = upper_triangle.columns[ i ]
-            colname_j = upper_triangle.columns[ j ]
-
-            # Estratégia: Remover a coluna 'i' (a segunda do par no loop)
-            # Outras estratégias poderiam ser implementadas aqui (ex: remover a com menor variância,
-            # ou a com menor correlação média com as demais, ou menor corr com o alvo se calculado)
-            columns_to_drop.add( colname_i )
-
-X_reduced_ff = X.drop( columns = list( columns_to_drop ) )
-
-X_reduced_ff.shape
-#%%
-df_corr_ff = pd.concat( [ X_reduced_ff, y ], axis = 1 )
-df_corr_ff.shape
-#%%
-# Armazenar para comparação
-datasets_X[ 'Correlação F-F' ] = X_reduced_ff.to_numpy()
-n_features[ 'Correlação F-F' ] = X_reduced_ff.shape[ 1 ]
-#%% md
-# ### 1.4.4 Seleção Baseada em Informação Mútua (Mutual Information)
+# ### 1.4.3 Seleção Baseada em Informação Mútua (Mutual Information)
 # 
 # Aqui será utilizada uma técnica de seleção de variáveis baseada em informação mútua, que mede a dependência estatística entre cada variável e a variável alvo. O objetivo é identificar quais variáveis carregam mais informação relevante para prever o resultado.
-# 
-# Ideia principal
-# - Calcular a informação mútua (MI) entre cada variável preditora e a variável alvo.
-# - Selecionar automaticamente as K variáveis mais informativas com base nos maiores scores de MI.
 #%%
-#  Codificar alvo (y) para formato numérico
-le = LabelEncoder()
-y_encoded = le.fit_transform( y )
+try:
+    # Verifica se y_encoded já existe de passos anteriores
+    y_encoded
+    print( "Variável 'y_encoded' já existe." )
+except NameError:
+    print( "Codificando a variável alvo 'y'..." )
+    if 'y' in locals() or 'y' in globals():
+        le = LabelEncoder()
+        y_encoded = le.fit_transform( y )
+        print( "Variável 'y_encoded' criada." )
+    else:
+        print( "ERRO: Variável 'y' não definida. Defina 'y' antes de prosseguir." )
+        # Pare a execução ou trate o erro conforme necessário
 
-# Criar uma cópia de X para codificar, preservando o X original por enquanto
-X_encoded = X.copy()
-#%%
-# Calculando Scores de Mutual Information
-mi_scores = mutual_info_classif( X_encoded, y_encoded, discrete_features = 'auto', random_state = 42 )
+# Defina o número de features que você quer manter (valor K)
+k_features_mi = 30
 
-# Criar uma Series para facilitar a visualização
-mi_scores_series = pd.Series( mi_scores, index = X_encoded.columns ).sort_values( ascending = False )
+# Crie a instância do seletor SelectKBest
+#    - score_func=mutual_info_classif: Especifica que usaremos MI para pontuar as features.
+#    - k=k_features_mi: Indica quantas features com maior score serão selecionadas.
+mi_selector = SelectKBest( score_func = mutual_info_classif, k = k_features_mi )
 
-# print("\nScores de Mutual Information calculados (maior para menor):")
-# print(mi_scores_series)
-
-# # Plotar os scores para visualização
-# plt.figure(figsize=(10, max(6, len(X_encoded.columns) // 2))) # Ajusta altura
-# mi_scores_series.plot(kind='barh', color='teal')
-# plt.title('Scores de Mutual Information por Feature')
-# plt.xlabel('Score MI')
-# plt.ylabel('Feature')
-# plt.gca().invert_yaxis() # Maior score no topo
-# plt.tight_layout() # Ajusta o layout para não cortar labels
-# plt.show()
-#%%
-# Selecionar as K Melhores Features
-k_features_to_keep = 30
-
-# Instanciar o seletor
-# Passamos a função de score e o número K
-selector = SelectKBest( score_func = mutual_info_classif, k = k_features_to_keep )
-
-# Ajustar o seletor aos dados codificados (X_encoded, y_encoded)
-selector.fit( X_encoded, y_encoded )
-
-# Obter as features selecionadas (nomes das colunas)
-selected_features_mask = selector.get_support()
-selected_features_names = X_encoded.columns[ selected_features_mask ]
-#%%
-# Selecionar as colunas correspondentes do DataFrame (X) para preservar os tipos de dados originais
-X_selected_mi = X[ selected_features_names ].copy()
-
-# Combinar as features selecionadas (X_selected_mi) com a coluna alvo (y)
-df_mi = pd.concat( [ X_selected_mi, y ], axis = 1 )
-df_mi.shape
-#%%
-# Armazenar para comparação
-datasets_X[ 'Mutual Info' ] = X_selected_mi.to_numpy()
-n_features[ 'Mutual Info' ] = X_selected_mi.shape[ 1 ]
 #%% md
-# ### 1.4.5 Seleção Baseada em Modelos de Árvore
+# ### 1.4.4 Seleção Baseada em Modelos de Árvore
 # 
 # Será treinado um modelo de floresta aleatória completo com todas as variáveis disponíveis. Após o treinamento, serão extraídas as importâncias atribuídas a cada variável. Em seguida, será aplicado um filtro automático que seleciona apenas as variáveis mais relevantes, com base em um critério quantitativo de corte.
-# 
-# Ideia principal
-# - Utilizar uma floresta de decisão com múltiplas árvores, que internamente avalia a utilidade de cada variável para separar os dados.
-# - Aproveitar a estimativa de desempenho fora da amostra (OOB) para obter uma noção de quão bem o modelo pode generalizar.
-# - Calcular a importância de cada variável com base em sua contribuição para reduzir a impureza nas árvores.
-# - Selecionar automaticamente apenas as variáveis cuja importância está acima de um limiar — neste caso, acima da mediana.
 #%%
-X_encoded = X.copy()
+try:
+    X
+    y_encoded
+except NameError:
+    print( "ERRO: 'X_numeric' ou 'y_encoded' não definidos. Execute as etapas anteriores primeiro." )
 
-# n_estimators: número de árvores na floresta
-# random_state: para reprodutibilidade
-# n_jobs=-1: usar todos os processadores disponíveis (acelera)
-# oob_score=True pode dar uma estimativa de desempenho
-rf_model = RandomForestClassifier(
-        n_estimators = 100,
+# Defina o limiar para seleção de features
+threshold_rf = "median"
+
+# Crie uma instância do estimador que será usado para calcular a importância
+rf_estimator_for_selection = RandomForestClassifier(
+        n_estimators = 50,
         random_state = 42,
         n_jobs = -1,
-        class_weight = 'balanced',
-        oob_score = True
 )
 
-rf_model.fit( X_encoded, y_encoded )
-print( f"Modelo treinado. OOB Score (estimativa de acurácia): {rf_model.oob_score_:.4f}" )
-#%%
-# Extrair as features importantes
-importances = rf_model.feature_importances_
-feature_importances = pd.Series( importances, index = X_encoded.columns ).sort_values( ascending = False )
-
-# print( "\nImportância das Features segundo o Random Forest:" )
-# print( feature_importances )
-
-# Plotar as importâncias
-# plt.figure( figsize = (10, max( 6, len( X_encoded.columns ) // 2 )) )
-# feature_importances.plot( kind = 'barh', color = 'forestgreen' )
-# plt.title( 'Importância das Features (Random Forest)' )
-# plt.xlabel( 'Importância Média de Redução de Impureza' )
-# plt.ylabel( 'Feature' )
-# plt.gca().invert_yaxis()
-# plt.tight_layout()
-# plt.show()
-#%%
-# SelectFromModel seleciona features cuja importância é maior que um limiar.
-# O limiar pode ser um valor numérico ou uma string como "mean" ou "median".
-# Usar "median" pode ser mais robusto a outliers nos scores de importância.
-threshold_value = "median"  # Ou 'mean', ou um float como 0.005
-
-# Passamos o modelo JÁ TREINADO (rf_model) e prefit=True
-# O threshold define o corte
-selector_rf = SelectFromModel( rf_model, threshold = threshold_value, prefit = True )
-
-# Aplicar o seletor aos dados codificados
-# Apenas verifica quais colunas passam no threshold
-mask_selected_rf = selector_rf.get_support()
-selected_features_rf_names = X_encoded.columns[ mask_selected_rf ]
-#%%
-# Selecionar as colunas do dataframe para manter os tipos
-X_selected_rf = X[ selected_features_rf_names ].copy()
-
-# Combinar com a coluna alvo
-df_rf = pd.concat( [ X_selected_rf, y ], axis = 1 )
-
-df_rf.shape
-#%%
-# Armazenar para comparação
-datasets_X[ 'RF Importance' ] = X_selected_rf.to_numpy()
-n_features[ 'RF Importance' ] = X_selected_rf.shape[ 1 ]
+# Crie a instância do seletor SelectFromModel
+rf_importance_selector = SelectFromModel(
+        estimator = rf_estimator_for_selection,
+        threshold = threshold_rf,
+        prefit = False
+)
 #%% md
-# ### 1.4.6 Eliminação Recursiva de Atributos
+# ### 1.4.5 Eliminação Recursiva de Atributos
 # 
 # Será aplicado um processo automático que, a cada rodada, elimina uma variável de entrada e avalia como isso afeta a capacidade do modelo de previsão. Ao final, identifica o conjunto de variáveis que oferece o melhor desempenho.
-# 
-# Ideia principal:
-# - Montar um classificador robusto (floresta de decisões) que já compensa desequilíbrios entre classes.
-# - Dividir os dados várias vezes (20 “rodadas”), mantendo a proporção de cada classe em cada divisão, para testar estabilidade.
-# - Em cada rodada, remover sistematicamente uma variável diferente e medir a performance.
-# - Repetir até atingir um número mínimo de variáveis.
-# - Escolher o ponto em que o modelo atingiu sua maior média de acurácia nas rodadas de teste.
 #%%
-# Aproveitando o modelo do Random Florest criando antes
-estimator = rf_model
+try:
+    X
+    y_encoded
+    print( "Usando 'X' e 'y_encoded' existentes." )
+except NameError:
+    print( "ERRO: 'X' ou 'y_encoded' não definidos. Execute as etapas anteriores primeiro." )
 
-# Estratégia de Validação Cruzada
-# StratifiedKFold mantém a proporção das classes em cada fold, bom para classificação.
-cv_strategy = StratifiedKFold(
-        n_splits = 10,  # Número de folds
-        shuffle = True,  # Embaralhar os dados antes de dividir
-        random_state = 42
+print( "\nDividindo os dados em Conjunto de Treino e Conjunto de Teste..." )
+try:
+    X_train, X_test, y_train, y_test = train_test_split(
+            X,
+            y_encoded,
+            test_size = 0.25,
+            random_state = 42,
+            stratify = y_encoded
+    )
+    print( f"Divisão Concluída:" )
+    print( f"  - Treino: {X_train.shape[ 0 ]} amostras, {X_train.shape[ 1 ]} features" )
+    print( f"  - Teste:  {X_test.shape[ 0 ]} amostras, {X_test.shape[ 1 ]} features" )
+    print( "\nIMPORTANTE: O conjunto de Teste (X_test, y_test) NÃO será usado até a avaliação final." )
+    print( "Toda a otimização (RFECV) e validação cruzada (cross_val_score) ocorrerá APENAS em (X_train, y_train)." )
+
+except ValueError as e:
+    print( f"ERRO ao dividir os dados: {e}. Verifique o tamanho dos dados e o parâmetro stratify." )
+    # exit()
+except NameError:
+    print( "ERRO: 'X' ou 'y_encoded' não definidos antes da divisão." )
+    # exit()
+
+#%%
+# Estimador para o RFECV (pode ser o mesmo que usaremos no RFE depois)
+estimator_for_cv = RandomForestClassifier(
+        n_estimators = 50, random_state = 42, class_weight = 'balanced', n_jobs = -1
 )
 
-# Métrica para avaliar o "time" em cada "jogo de teste"
-# 'accuracy': Acurácia geral
-# 'f1_weighted': Média F1 ponderada pelas classes
-# 'roc_auc': Área sob a curva ROC (bom para classificação binária)
-scoring_metric = 'accuracy'
+cv_strategy_rfe = StratifiedKFold( n_splits = 10, shuffle = True, random_state = 42 )
 
-# Número mínimo de features a manter (para não acabar com zero)
-min_features = max( 1, min( 5, X_encoded.shape[ 1 ] // 2 ) )
+# Escalonar os dados de TREINO *antes* de passar para o RFECV
+scaler_rfecv = StandardScaler()
+X_train_scaled_for_rfecv = scaler_rfecv.fit_transform( X_train )  # Fit APENAS no treino
 
-# Instanciar o RFECV
+# Instanciar e rodar RFECV
 rfecv_selector = RFECV(
-        estimator = estimator,  # O modelo "técnico"
-        step = 1,  # Remover 1 feature por vez
-        cv = cv_strategy,  # A estratégia de validação cruzada
-        scoring = scoring_metric,  # A métrica para avaliar o desempenho
-        min_features_to_select = min_features,  # Número mínimo de features
-        n_jobs = -1  # Usar todos os processadores para paralelizar a CV
-)
-
-rfecv_selector.fit( X_encoded, y_encoded )
-#%%
-optimal_n_features = rfecv_selector.n_features_
-selected_features_mask_rfe = rfecv_selector.support_  # Máscara booleana das features selecionadas
-selected_features_rfe_names = X_encoded.columns[ selected_features_mask_rfe ]
-
-# Visualizar o resultado da validação cruzada
-# Isso mostra como o score da métrica variou conforme o número de features foi mudando
-if hasattr( rfecv_selector, 'cv_results_' ):
-    try:
-        # Obter os scores médios e desvios padrão da validação cruzada
-        mean_scores = rfecv_selector.cv_results_[ 'mean_test_score' ]
-        std_scores = rfecv_selector.cv_results_[ 'std_test_score' ]
-        # Número de features correspondente a cada score
-        n_features_tested = range(
-                rfecv_selector.min_features_to_select,
-                len( mean_scores ) + rfecv_selector.min_features_to_select
-        )
-
-        plt.figure( figsize = (12, 7) )
-        plt.xlabel( "Número de Features Selecionadas" )
-        plt.ylabel( f"Score Médio CV ({scoring_metric})" )
-        plt.errorbar(
-                n_features_tested, mean_scores, yerr = std_scores, fmt = '-o', capsize = 3, ecolor = 'lightgray',
-                elinewidth = 1
-        )
-        plt.title( "RFECV: Desempenho vs Número de Features" )
-
-        # Marcar o ponto ótimo
-        optimal_idx = optimal_n_features - rfecv_selector.min_features_to_select
-        if 0 <= optimal_idx < len( mean_scores ):
-            plt.plot(
-                    optimal_n_features, mean_scores[ optimal_idx ], 'r*', markersize = 10,
-                    label = f'Ótimo ({optimal_n_features} features, Score: {mean_scores[ optimal_idx ]:.4f})'
-            )
-            plt.axvline( x = optimal_n_features, color = 'red', linestyle = '--', alpha = 0.7 )
-        else:
-            print(
-                    f"Aviso: Índice ótimo ({optimal_idx}) fora do range dos scores. Não foi possível marcar o ponto ótimo no gráfico."
-            )
-
-        plt.legend( loc = 'best' )
-        plt.grid( True, linestyle = '--', alpha = 0.6 )
-        plt.show()
-
-    except KeyError as e:
-        print(
-                f"Erro ao acessar 'cv_results_' para plotagem (KeyError: {e}). Verifique a versão do scikit-learn ou os resultados do RFECV."
-        )
-    except Exception as e:
-        print( f"Ocorreu um erro inesperado ao gerar o gráfico de CV: {e}" )
-else:
-    print( "Atributo 'cv_results_' não encontrado no seletor RFECV. Não é possível gerar o gráfico." )
-
-#%%
-# Selecionar as colunas do dataframe
-X_selected_rfe = X[ selected_features_rfe_names ].copy()
-
-# Combinar com a coluna alvo
-df_rfe = pd.concat( [ X_selected_rfe, y ], axis = 1 )
-
-df_rfe.shape
-#%%
-# Armazenar para comparação
-datasets_X[ 'RFE' ] = X_selected_rfe.to_numpy()
-n_features[ 'RFE' ] = X_selected_rfe.shape[ 1 ]
-#%% md
-# ### 1.4.7 Análise de Componentes Principais (PCA)
-# 
-# Será aplicada uma técnica que transforma as variáveis originais em um novo conjunto de variáveis não correlacionadas — os componentes principais — que retêm o máximo possível da variabilidade dos dados originais. O número de componentes será definido automaticamente com base em um critério de variância explicada.
-# 
-# Ideia principal
-# - Reduzir a dimensionalidade do conjunto de dados mantendo o máximo de informação possível.
-# - Aplicar pré-processamento apropriado para garantir que todas as variáveis tenham contribuição balanceada.
-# - Calcular todos os componentes principais inicialmente, apenas para analisar a variância explicada.
-# - Selecionar automaticamente o número de componentes com base em um critério de variância explicada.
-# - Obter um novo conjunto de variáveis transformadas (componentes principais) para uso posterior.
-#%%
-from sklearn.preprocessing import StandardScaler  # Apenas StandardScaler é necessário para X
-from sklearn.decomposition import PCA
-
-# Escalonar todas as features em X
-scaler = StandardScaler()
-X_scaled = scaler.fit_transform( X )  # Aplica o escalonamento a todas as colunas de X
-
-# Note que PCA funciona diretamente com o array NumPy X_scaled
-X_scaled_df = pd.DataFrame( X_scaled, index = X.index, columns = X.columns )
-
-# Instanciar e ajustar o PCA inicialmente sem definir n_components
-# Isso calcula todos os componentes possíveis e sua variância explicada.
-# Usamos X_scaled (o array NumPy) que é o resultado do scaler.
-pca_full = PCA( random_state = 42 )
-pca_full.fit( X_scaled )
-#%%
-# Analisar a Variância Explicada
-explained_variance_ratio = pca_full.explained_variance_ratio_
-cumulative_explained_variance = np.cumsum( explained_variance_ratio )
-
-print( f"\nNúmero total de componentes principais possíveis: {len( explained_variance_ratio )}" )
-
-# Plotar a variância explicada cumulativa (Scree Plot)
-plt.figure( figsize = (10, 6) )
-plt.plot(
-        range( 1, len( cumulative_explained_variance ) + 1 ), cumulative_explained_variance, marker = 'o',
-        linestyle = '--'
-)
-plt.title( 'Variância Explicada Cumulativa pelos Componentes Principais' )
-plt.xlabel( 'Número de Componentes Principais' )
-plt.ylabel( 'Variância Explicada Cumulativa (%)' )
-plt.grid( True, linestyle = '--', alpha = 0.7 )
-
-# Adicionar linhas de referência (ex: 95% e 99% da variância)
-plt.axhline( y = 0.95, color = 'r', linestyle = '-', linewidth = 1, label = '95% Variância Explicada' )
-plt.axhline( y = 0.99, color = 'g', linestyle = ':', linewidth = 1, label = '99% Variância Explicada' )
-
-# Adicionar anotação para o número de componentes em 95%
-try:
-    n_components_95 = np.argmax( cumulative_explained_variance >= 0.95 ) + 1
-    # Verifica se n_components_95 está dentro dos limites do eixo X antes de plotar o texto/ponto
-    if n_components_95 <= len( cumulative_explained_variance ):
-        plt.text(
-                n_components_95 + 0.5, cumulative_explained_variance[ n_components_95 - 1 ] - 0.02,
-                f'{n_components_95} comps.', color = 'red', ha = 'left', va = 'top'
-        )
-        plt.scatter(
-                n_components_95, cumulative_explained_variance[ n_components_95 - 1 ], c = 'red', s = 50,
-                zorder = 5
-        )  # Marca o ponto
-        print( f"Número de componentes para explicar >= 95% da variância: {n_components_95}" )
-    else:
-        print( "Threshold de 95% não alcançado ou alcançado apenas com todos os componentes." )
-except IndexError:
-    print( "Não foi possível calcular n_components para 95%." )
-
-plt.ylim( min( cumulative_explained_variance ) - 0.05, 1.05 )  # Ajuste o limite inferior do eixo Y dinamicamente
-plt.xlim( 0, len( cumulative_explained_variance ) + 1 )  # Limite do eixo X
-plt.legend( loc = 'best' )
-plt.tight_layout()
-plt.show()
-
-#%%
-# Escolher o número de componentes (n_components)
-variance_threshold = 0.95
-n_components_chosen = np.argmax( cumulative_explained_variance >= variance_threshold ) + 1
-
-# Certifique-se que n_components_chosen não seja 0 se o primeiro componente já atingir o limiar
-if n_components_chosen == 0 and cumulative_explained_variance[ 0 ] >= variance_threshold:
-    n_components_chosen = 1
-# Ou escolha um número fixo se preferir: n_components_chosen = 30
-
-# 5. Aplicar PCA com o número de componentes escolhido
-pca_final = PCA( n_components = n_components_chosen, random_state = 42 )
-# Usa X_scaled (dados escalados) para o fit_transform final
-X_pca = pca_final.fit_transform( X_scaled )
-#%%
-# Criar o DataFrame final com os Componentes Principais
-pc_columns = [ f'PC{i + 1}' for i in range( n_components_chosen ) ]
-X_pca_df = pd.DataFrame( X_pca, index = X.index, columns = pc_columns )
-
-# Combinar os componentes principais com a variável alvo y
-df_pca = pd.concat( [ X_pca_df, y.reset_index( drop = True ) ], axis = 1 )
-
-df_pca.shape
-#%%
-# Armazenar resultado (já é NumPy array numérico)
-datasets_X[ 'PCA' ] = X_pca
-n_features[ 'PCA' ] = X_pca.shape[ 1 ]
-#%% md
-# ### 1.4.8 Análise Discriminante Linear (LDA)
-# 
-# Será aplicada a técnica de Análise Discriminante Linear sobre os dados escalados. O objetivo principal é encontrar um novo espaço de menor dimensão no qual as classes sejam mais facilmente separáveis. Isso é feito projetando os dados sobre eixos que maximizam a separação entre as classes com base em variância entre e dentro das classes.
-# 
-# Ideia principal
-# - A LDA encontra combinações lineares das variáveis que melhor separam as classes.
-# - O número máximo de componentes possíveis é limitado pelo número de classes (n_classes - 1) e pelo número de variáveis (n_features).
-# - Após a transformação, cada componente discriminante representa um eixo que maximiza a razão entre variância entre classes e variância intra-classe.
-# - Também é possível visualizar a variância explicada por cada componente, o que ajuda a entender a contribuição de cada eixo para a separação das classes.
-#%%
-from sklearn.discriminant_analysis import LinearDiscriminantAnalysis  # Import LDA
-
-y_1d = y
-
-n_classes = y_1d.nunique()
-n_features_lda = X_scaled.shape[ 1 ]
-print( f"Número de classes únicas em y: {n_classes}" )
-
-# Determinar o número de componentes para LDA.
-max_lda_components = min( n_features_lda, n_classes - 1 )
-n_components_lda = max_lda_components
-
-# Instanciar e ajustar o LDA
-lda = LinearDiscriminantAnalysis( n_components = n_components_lda )
-
-# Ajustar e transformar os dados escalados (X_scaled) usando y_1d
-X_lda = lda.fit_transform( X_scaled, y_1d )
-
-print( f"\nShape dos dados após LDA ({n_components_lda} componentes): {X_lda.shape}" )
-
-# Verificar a variância explicada
-try:
-    explained_variance_ratio_lda = lda.explained_variance_ratio_
-    print( f"Razão da variância (entre classes) explicada pelos componentes LDA: {explained_variance_ratio_lda}" )
-    print( f"Razão da variância cumulativa: {np.cumsum( explained_variance_ratio_lda )}" )
-
-    # Plot opcional da variância explicada pelo LDA
-    plt.figure( figsize = (8, 5) )
-    plt.bar(
-            range( 1, n_components_lda + 1 ), explained_variance_ratio_lda, alpha = 0.7, align = 'center',
-            label = 'Variância Individual'
-    )
-    plt.step(
-            range( 1, n_components_lda + 1 ), np.cumsum( explained_variance_ratio_lda ), where = 'mid',
-            label = 'Variância Cumulativa'
-    )
-    plt.ylabel( 'Razão da Variância Explicada' )
-    plt.xlabel( 'Componente Discriminante Linear' )
-    plt.title( 'Variância Explicada pelos Componentes LDA' )
-    plt.xticks( range( 1, n_components_lda + 1 ) )
-    plt.legend( loc = 'best' )
-    plt.grid( True, axis = 'y', linestyle = '--', alpha = 0.7 )
-    plt.tight_layout()
-    plt.show()
-
-except AttributeError:
-    print( "\nNão foi possível obter a variância explicada (pode não estar disponível)." )
-
-#%%
-# Criar o DataFrame final com os Componentes Discriminantes Lineares
-ld_columns = [ f'LD{i + 1}' for i in range( n_components_lda ) ]
-X_lda_df = pd.DataFrame( X_lda, index = X.index, columns = ld_columns )
-
-# Combinar os componentes LDA com a variável alvo y
-# Usar reset_index(drop=True) em y garante o alinhamento dos índices
-df_lda = pd.concat( [ X_lda_df, y_1d.reset_index( drop = True ) ], axis = 1 )
-
-df_lda.shape
-#%%
-# Armazenar resultado
-datasets_X[ 'LDA' ] = X_lda
-n_features[ 'LDA' ] = X_lda.shape[ 1 ]
-#%% md
-# ## 1.5 Impacto na Dimensionalidade
-#%%
-from sklearn.neural_network import MLPClassifier
-from sklearn.tree import DecisionTreeClassifier
-from sklearn.svm import SVC
-from sklearn.linear_model import LogisticRegression
-from sklearn.pipeline import Pipeline
-from sklearn.model_selection import cross_val_score
-import time
-
-# Avaliação Comparativa do Impacto da Redução de Dimensionalidade
-
-models_eval = {
-    "Logistic Regression": Pipeline(
-            [
-                ('scaler', StandardScaler()),
-                ('clf', LogisticRegression(
-                        random_state = 42, max_iter = 1000, solver = 'liblinear', class_weight = 'balanced' ))
-            ] ),
-    "Random Forest": Pipeline(
-            [
-                ('clf', RandomForestClassifier(
-                        random_state = 42, n_estimators = 100, class_weight = 'balanced', n_jobs = -1 ))
-            ] ),
-    "SVC": Pipeline(
-            [
-                ('scaler', StandardScaler()),
-                ('clf', SVC( random_state = 42, probability = True, class_weight = 'balanced' ))
-            ] ),
-    "Decision Tree": Pipeline(
-            [
-                ('clf', DecisionTreeClassifier( random_state = 42, class_weight = 'balanced' ))
-            ] ),
-    "MLP": Pipeline(
-            [
-                ('scaler', StandardScaler()),
-                ('clf',
-                 MLPClassifier( random_state = 42, max_iter = 500, hidden_layer_sizes = (100,), early_stopping = True ))
-            ] )
-}
-#%%
-
-# --- Estratégia de Avaliação ---
-cv_strategy_eval = StratifiedKFold( n_splits = 10, shuffle = True, random_state = 42 )
-scoring_metrics_eval = [ 'accuracy', 'f1_weighted', 'roc_auc' ]  # Métricas relevantes
-
-# --- Loop de Avaliação ---
-results_eval = [ ]  # Lista para armazenar os resultados
-
-print( "\nIniciando avaliação comparativa dos modelos com validação cruzada..." )
-
-# Usar y_final_encoded que já está pronto
-y_target_eval = y_encoded
-
-for data_name, X_data in datasets_X.items():
-    current_n_features = n_features[ data_name ]
-    print( f"\nAvaliando Dataset: '{data_name}' ({current_n_features} features)" )
-
-    # Verificações básicas nos dados
-    if X_data.shape[ 0 ] != len( y_target_eval ):
-        print(
-                f"ERRO CRÍTICO: Disparidade no número de amostras! X_{data_name} tem {X_data.shape[ 0 ]}, y tem {len( y_target_eval )}. Pulando." )
-        continue
-    if np.isnan( X_data ).any():
-        print(
-                f"AVISO CRÍTICO: NaNs encontrados em X_{data_name} ANTES da CV. Preenchendo com 0 para tentar continuar, mas VERIFIQUE O PRÉ-PROCESSAMENTO." )
-        # Estratégia de preenchimento simples para evitar falha total, mas idealmente isso não deveria acontecer aqui.
-        X_data = np.nan_to_num( X_data, nan = 0.0, posinf = 0.0, neginf = 0.0 )
-
-    for model_name, pipeline in models_eval.items():
-        print( f"  - Modelo: {model_name}" )
-        # Executar validação cruzada para cada métrica
-        for metric in scoring_metrics_eval:
-            start_time_cv = time.time()
-            try:
-                # Verificar se X_data é adequado (ex: LDA pode ter poucas features para alguns modelos)
-                if X_data.shape[ 1 ] == 0:
-                    print( f"    * {metric}: ERRO - Dataset '{data_name}' não possui features. Pulando." )
-                    score_mean, score_std = np.nan, np.nan  # Marcar como NaN
-                elif metric == 'roc_auc' and len( np.unique( y_target_eval ) ) > 2:
-                    # ROC AUC multiclasse precisa de ajustes ou pode não ser padrão no cross_val_score dependendo da versão
-                    # Tentar com OvR (One-vs-Rest) se disponível ou pular
-                    try:
-                        scores = cross_val_score(
-                                pipeline, X_data, y_target_eval, cv = cv_strategy_eval,
-                                scoring = 'roc_auc_ovr_weighted',
-                                n_jobs = -1 )
-                        score_mean = np.mean( scores )
-                        score_std = np.std( scores )
-                    except ValueError:
-                        print(
-                                f"    * {metric} (multiclass): Não foi possível calcular 'roc_auc_ovr_weighted'. Pulando métrica." )
-                        score_mean, score_std = np.nan, np.nan
-                else:
-                    scores = cross_val_score(
-                            pipeline, X_data, y_target_eval, cv = cv_strategy_eval, scoring = metric, n_jobs = -1 )
-                    score_mean = np.mean( scores )
-                    score_std = np.std( scores )
-
-                end_time_cv = time.time()
-
-                # Armazenar resultado apenas se o cálculo foi bem-sucedido
-                if pd.notna( score_mean ):
-                    results_eval.append(
-                            {
-                                'Dataset': data_name,
-                                'Num Features': current_n_features,
-                                'Model': model_name,
-                                'Metric': metric,
-                                'Mean Score': score_mean,
-                                'Std Score': score_std,
-                                'CV Time (s)': end_time_cv - start_time_cv
-                            } )
-                    print(
-                            f"    * {metric}: {score_mean:.4f} +/- {score_std:.4f} (Tempo: {end_time_cv - start_time_cv:.2f}s)" )
-                else:
-                    # Registrar que não foi possível calcular
-                    results_eval.append(
-                            {
-                                'Dataset': data_name,
-                                'Num Features': current_n_features,
-                                'Model': model_name,
-                                'Metric': metric,
-                                'Mean Score': np.nan,
-                                'Std Score': np.nan,
-                                'CV Time (s)': end_time_cv - start_time_cv
-                            } )
-
-
-            except ValueError as ve:
-                print(
-                        f"    ERRO de ValueError durante CV para {model_name} com métrica {metric} (verifique dados/parâmetros): {ve}" )
-                # Registrar falha
-                results_eval.append(
-                        { 'Dataset': data_name, 'Num Features': current_n_features, 'Model': model_name,
-                          'Metric': metric, 'Mean Score': np.nan, 'Std Score': np.nan,
-                          'CV Time (s)': time.time() - start_time_cv } )
-            except Exception as e:
-                print( f"    ERRO inesperado durante CV para {model_name} com métrica {metric}: {e}" )
-                # Registrar falha
-                results_eval.append(
-                        { 'Dataset': data_name, 'Num Features': current_n_features, 'Model': model_name,
-                          'Metric': metric, 'Mean Score': np.nan, 'Std Score': np.nan,
-                          'CV Time (s)': time.time() - start_time_cv } )
-
-print( "\nAvaliação comparativa concluída." )
-
-#%%
-if results_eval:
-    results_eval_df = pd.DataFrame( results_eval )
-
-    # Gerar Gráficos de Barras Comparativos
-    print( "\n--- Gráficos Comparativos de Desempenho ---" )
-    for metric in scoring_metrics_eval:
-        plt.figure( figsize = (15, 8) )  # Aumentado o tamanho
-
-        # Filtrar dados para a métrica atual e remover NaNs no score para plotagem
-        metric_df = results_eval_df[
-            (results_eval_df[ 'Metric' ] == metric) & (results_eval_df[ 'Mean Score' ].notna()) ].copy()
-
-        # Ordenar os datasets pela quantidade de features para o eixo X
-        # Criar uma ordem baseada no dicionário n_features
-        ordered_datasets = sorted(
-                metric_df[ 'Dataset' ].unique(), key = lambda x: n_features.get( x, float( 'inf' ) ) )
-        metric_df[ 'Dataset' ] = pd.Categorical( metric_df[ 'Dataset' ], categories = ordered_datasets, ordered = True )
-        metric_df.sort_values( by = [ 'Dataset', 'Model' ], inplace = True )  # Ordenar para consistência
-
-        if not metric_df.empty:
-
-            # Usando barplot diretamente para mais controle sobre eixos
-            ax = sns.barplot(
-                    data = metric_df, x = 'Dataset', y = 'Mean Score', hue = 'Model', palette = 'viridis',
-                    order = ordered_datasets )
-            ax.set_title( f'Comparação de Desempenho ({metric.capitalize()}) por Técnica de Redução' )
-            ax.set_ylabel( f'Score Médio ({metric}) na Validação Cruzada' )
-            ax.set_xlabel( 'Técnica de Redução / Dataset (# Features)' )
-            # Adicionar número de features ao label do eixo x
-            xtick_labels = [ f"{ds}\n({n_features.get( ds, '?' )} feats)" for ds in ordered_datasets ]
-            ax.set_xticklabels( xtick_labels, rotation = 45, ha = 'right' )
-            ax.legend( title = 'Modelo', bbox_to_anchor = (1.02, 1), loc = 'upper left' )
-            ax.grid( axis = 'y', linestyle = '--', alpha = 0.7 )
-            plt.tight_layout( rect = [ 0, 0, 0.9, 1 ] )  # Ajustar layout para legenda fora
-            plt.show()
-
-        else:
-            print( f"Não há dados válidos para plotar para a métrica '{metric}'." )
-#%% md
-# # 0. Lendo Arquivo
-#%%
-import pandas as pd
-import numpy as np
-import seaborn as sns
-import matplotlib.pyplot as plt
-from sklearn.feature_selection import SelectKBest, mutual_info_classif
-from sklearn.preprocessing import LabelEncoder
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.feature_selection import SelectFromModel
-from sklearn.feature_selection import RFECV  # Recursive Feature Elimination with Cross-Validation
-from sklearn.model_selection import StratifiedKFold  # Estratégia de validação cruzadas
-#%%
-df = pd.read_csv( 'radiomic_data.csv' )
-df.shape
-#%% md
-# # 1. Pré-processamento da base de dados
-#%% md
-# ## 1.1 Quantidade de Classes
-#%%
-# Quantas ocorrências de cada classe
-contagens = df[ df.columns[ -1 ] ].value_counts()
-print( contagens )
-#%% md
-# ### 1.1.1 Removendo a classe extra
-#
-# Como na especificação foi comentado que existem duas classes, sendo elas BENIGN e MALIGNANT, é necessário remover as instâncias da classe BENIGN_WITHOUT_CALLBACK.
-#%%
-# Nome da coluna alvo
-target_column_name = df.columns[ -1 ]
-
-X = df.drop( columns = target_column_name )
-y = df[ target_column_name ]
-
-mask = y != 'BENIGN_WITHOUT_CALLBACK'
-X_bin = X[ mask ]
-y_bin = y[ mask ]
-
-df = pd.concat( [ X_bin, y_bin ], axis = 1 )
-df.shape
-#%% md
-# ## 1.2 Valores Ausentes
-#%% md
-# ### 1.2.1 Ver se há algum valor ausente no DataFrame
-#
-# Retorna `True` se houver pelo menos um valor ausente.
-#%%
-df.isnull().values.any()
-#%% md
-# ### 1.2.2 Contar quantos valores ausentes há em cada coluna
-#%%
-df.isnull().sum()
-#%% md
-# ### 1.2.3 Exibir linhas que possuem valores ausentes
-#%%
-df[ df.isnull().any( axis = 1 ) ]
-#%% md
-# **Resultado: não há valores ausentes na base de dados.**
-#%% md
-# ## 1.3 Valores Duplicados
-#%% md
-# ### 1.3.1 Ver se há alguma linha duplicada
-#
-# Retorna `True` se houver ao menos uma linha duplicada
-#%%
-df.duplicated().any()
-#%% md
-# ### 1.3.2 Contar o número de linhas duplicadas
-#%%
-df.duplicated().sum()
-#%% md
-# ### 1.3.3 Ver quais são as linhas duplicadas
-#%%
-df[ df.duplicated() ]
-#%% md
-# **Resultado: não há linhas duplicadas na base de dados.**
-#%% md
-# ## 1.4 Redução de Dimensionalidade
-#%% md
-# ### 1.4.1 Remover colunas manualmente
-#
-# Algumas colunas na base de dados são sobre versões de bibliotecas, tamanho das imagens e algumas outras coisas.
-#%%
-columns_to_drop: list[ str ] = [ 'diagnostics_Versions_PyRadiomics', 'diagnostics_Versions_Numpy',
-                                 'diagnostics_Versions_SimpleITK', 'diagnostics_Versions_PyWavelet',
-                                 'diagnostics_Versions_Python', 'diagnostics_Configuration_Settings',
-                                 'diagnostics_Configuration_EnabledImageTypes', 'diagnostics_Image-original_Hash',
-                                 'diagnostics_Image-original_Dimensionality', 'diagnostics_Image-original_Spacing',
-                                 'diagnostics_Image-original_Size', 'diagnostics_Image-original_Mean',
-                                 'diagnostics_Mask-original_Hash', 'diagnostics_Mask-original_BoundingBox',
-                                 'diagnostics_Mask-original_VoxelNum', 'diagnostics_Mask-original_VolumeNum',
-                                 'diagnostics_Mask-original_CenterOfMassIndex',
-                                 'diagnostics_Mask-original_CenterOfMass' ]
-#%% md
-# ### 1.4.2 Colunas com valores únicos
-#%% md
-# Algumas colunas da base de dados são preenchidas com um único valor, o que não ajuda muito.
-#%%
-# Conta valores únicos em cada coluna
-unique_counts = df.nunique()
-
-# Seleciona nomes de colunas constantes
-constant_columns = unique_counts[ unique_counts == 1 ].index.tolist()
-
-# Unificando as listas de colunas que serão removidas
-columns_to_drop.extend( constant_columns )
-
-df = df.drop( columns = columns_to_drop )
-df.shape
-#%% md
-# ### 1.4.3 Análise de Correlação
-#
-# Aqui será aplicada uma técnica de remoção de variáveis altamente correlacionadas entre si, baseada em análise de correlação entre features numéricas.
-#
-# Ideia principal
-# - Se duas variáveis têm correlação muito alta (ex: > 0.9), elas transmitem praticamente a mesma informação.
-# - Manter ambas pode ser redundante e até prejudicial para o modelo.
-# - Eliminar uma das duas ajuda a simplificar o modelo sem perda significativa de desempenho.
-#%%
-# Separando as features (X) da variável alvo (y)
-X = df.drop( columns = [ target_column_name ] )
-y = df[ target_column_name ]
-
-# Pegando as colunas numéricas de X
-numeric_cols = X.select_dtypes( include = np.number ).columns.tolist()
-#%%
-# --- Dicionário para armazenar resultados X para comparação ---
-datasets_X = { }
-n_features = { }
-datasets_X[ 'Baseline' ] = X.to_numpy()  # Adicionar baseline codificado
-n_features[ 'Baseline' ] = X.shape[ 1 ]
-#%%
-# Calculando matriz de correlação
-correlation_matrix = X[ numeric_cols ].corr()
-
-# Plotando o resultado
-# plt.figure( figsize = (8, 6) )
-# sns.heatmap( correlation_matrix, cmap = 'coolwarm', annot = False )
-# plt.title( 'Matriz de Correlação Feature-Feature' )
-# plt.show()
-#%% md
-# # **TESTAR OUTRAS ESTRATÉGIAS**
-#%%
-# Limiar de correlação absoluta
-correlation_threshold = 0.9
-
-# Encontrar pares de features com correlação acima do limiar
-# Usamos o triângulo superior da matriz para evitar pares duplicados (A,B) e (B,A)
-# e correlação de uma feature com ela mesma (diagonal = 1)
-upper_triangle = correlation_matrix.where( np.triu( np.ones( correlation_matrix.shape ), k = 1 ).astype( bool ) )
-
-# Encontrar colunas a serem removidas
-columns_to_drop = set()
-for i in range( len( upper_triangle.columns ) ):
-    for j in range( i ):
-        if abs( upper_triangle.iloc[ j, i ] ) > correlation_threshold:
-            colname_i = upper_triangle.columns[ i ]
-            colname_j = upper_triangle.columns[ j ]
-
-            # Estratégia: Remover a coluna 'i' (a segunda do par no loop)
-            # Outras estratégias poderiam ser implementadas aqui (ex: remover a com menor variância,
-            # ou a com menor correlação média com as demais, ou menor corr com o alvo se calculado)
-            columns_to_drop.add( colname_i )
-
-X_reduced_ff = X.drop( columns = list( columns_to_drop ) )
-
-X_reduced_ff.shape
-#%%
-df_corr_ff = pd.concat( [ X_reduced_ff, y ], axis = 1 )
-df_corr_ff.shape
-#%%
-# Armazenar para comparação
-datasets_X[ 'Correlação F-F' ] = X_reduced_ff.to_numpy()
-n_features[ 'Correlação F-F' ] = X_reduced_ff.shape[ 1 ]
-#%% md
-# ### 1.4.4 Seleção Baseada em Informação Mútua (Mutual Information)
-#
-# Aqui será utilizada uma técnica de seleção de variáveis baseada em informação mútua, que mede a dependência estatística entre cada variável e a variável alvo. O objetivo é identificar quais variáveis carregam mais informação relevante para prever o resultado.
-#
-# Ideia principal
-# - Calcular a informação mútua (MI) entre cada variável preditora e a variável alvo.
-# - Selecionar automaticamente as K variáveis mais informativas com base nos maiores scores de MI.
-#%%
-#  Codificar alvo (y) para formato numérico
-le = LabelEncoder()
-y_encoded = le.fit_transform( y )
-
-# Criar uma cópia de X para codificar, preservando o X original por enquanto
-X_encoded = X.copy()
-#%%
-# Calculando Scores de Mutual Information
-mi_scores = mutual_info_classif( X_encoded, y_encoded, discrete_features = 'auto', random_state = 42 )
-
-# Criar uma Series para facilitar a visualização
-mi_scores_series = pd.Series( mi_scores, index = X_encoded.columns ).sort_values( ascending = False )
-
-# print("\nScores de Mutual Information calculados (maior para menor):")
-# print(mi_scores_series)
-
-# # Plotar os scores para visualização
-# plt.figure(figsize=(10, max(6, len(X_encoded.columns) // 2))) # Ajusta altura
-# mi_scores_series.plot(kind='barh', color='teal')
-# plt.title('Scores de Mutual Information por Feature')
-# plt.xlabel('Score MI')
-# plt.ylabel('Feature')
-# plt.gca().invert_yaxis() # Maior score no topo
-# plt.tight_layout() # Ajusta o layout para não cortar labels
-# plt.show()
-#%%
-# Selecionar as K Melhores Features
-k_features_to_keep = 30
-
-# Instanciar o seletor
-# Passamos a função de score e o número K
-selector = SelectKBest( score_func = mutual_info_classif, k = k_features_to_keep )
-
-# Ajustar o seletor aos dados codificados (X_encoded, y_encoded)
-selector.fit( X_encoded, y_encoded )
-
-# Obter as features selecionadas (nomes das colunas)
-selected_features_mask = selector.get_support()
-selected_features_names = X_encoded.columns[ selected_features_mask ]
-#%%
-# Selecionar as colunas correspondentes do DataFrame (X) para preservar os tipos de dados originais
-X_selected_mi = X[ selected_features_names ].copy()
-
-# Combinar as features selecionadas (X_selected_mi) com a coluna alvo (y)
-df_mi = pd.concat( [ X_selected_mi, y ], axis = 1 )
-df_mi.shape
-#%%
-# Armazenar para comparação
-datasets_X[ 'Mutual Info' ] = X_selected_mi.to_numpy()
-n_features[ 'Mutual Info' ] = X_selected_mi.shape[ 1 ]
-#%% md
-# ### 1.4.5 Seleção Baseada em Modelos de Árvore
-#
-# Será treinado um modelo de floresta aleatória completo com todas as variáveis disponíveis. Após o treinamento, serão extraídas as importâncias atribuídas a cada variável. Em seguida, será aplicado um filtro automático que seleciona apenas as variáveis mais relevantes, com base em um critério quantitativo de corte.
-#
-# Ideia principal
-# - Utilizar uma floresta de decisão com múltiplas árvores, que internamente avalia a utilidade de cada variável para separar os dados.
-# - Aproveitar a estimativa de desempenho fora da amostra (OOB) para obter uma noção de quão bem o modelo pode generalizar.
-# - Calcular a importância de cada variável com base em sua contribuição para reduzir a impureza nas árvores.
-# - Selecionar automaticamente apenas as variáveis cuja importância está acima de um limiar — neste caso, acima da mediana.
-#%%
-X_encoded = X.copy()
-
-# n_estimators: número de árvores na floresta
-# random_state: para reprodutibilidade
-# n_jobs=-1: usar todos os processadores disponíveis (acelera)
-# oob_score=True pode dar uma estimativa de desempenho
-rf_model = RandomForestClassifier(
-        n_estimators = 100,
-        random_state = 42,
+        estimator = estimator_for_cv,
+        step = 1,
+        cv = cv_strategy_rfe,
+        scoring = 'accuracy',
+        min_features_to_select = max( 1, X_train.shape[ 1 ] // 10 ),
         n_jobs = -1,
-        class_weight = 'balanced',
-        oob_score = True
+)
+rfecv_selector.fit( X_train_scaled_for_rfecv, y_train )
+
+# Obter o número ótimo de features encontrado
+n_features_rfe = rfecv_selector.n_features_
+print( f"RFECV (no treino) determinou n_features_to_select = {n_features_rfe}" )
+
+# Validar o número (precaução)
+if n_features_rfe > X_train.shape[ 1 ]: n_features_rfe = X_train.shape[ 1 ]
+if n_features_rfe <= 0: n_features_rfe = 1
+
+# Criar a instância do estimador para o RFE (que será usado no Pipeline)
+estimator_for_rfe = RandomForestClassifier(
+        n_estimators = 50, random_state = 42, n_jobs = -1, class_weight = 'balanced'
+)
+print( f"\nCriado estimador interno ('estimator_for_rfe') para o RFE." )
+
+# Criar a instância do seletor RFE final
+rfe_selector = RFE(
+        estimator = estimator_for_rfe,
+        n_features_to_select = n_features_rfe,
+        step = 1
 )
 
-rf_model.fit( X_encoded, y_encoded )
-print( f"Modelo treinado. OOB Score (estimativa de acurácia): {rf_model.oob_score_:.4f}" )
-#%%
-# Extrair as features importantes
-importances = rf_model.feature_importances_
-feature_importances = pd.Series( importances, index = X_encoded.columns ).sort_values( ascending = False )
-
-# print( "\nImportância das Features segundo o Random Forest:" )
-# print( feature_importances )
-
-# Plotar as importâncias
-# plt.figure( figsize = (10, max( 6, len( X_encoded.columns ) // 2 )) )
-# feature_importances.plot( kind = 'barh', color = 'forestgreen' )
-# plt.title( 'Importância das Features (Random Forest)' )
-# plt.xlabel( 'Importância Média de Redução de Impureza' )
-# plt.ylabel( 'Feature' )
-# plt.gca().invert_yaxis()
-# plt.tight_layout()
-# plt.show()
-#%%
-# SelectFromModel seleciona features cuja importância é maior que um limiar.
-# O limiar pode ser um valor numérico ou uma string como "mean" ou "median".
-# Usar "median" pode ser mais robusto a outliers nos scores de importância.
-threshold_value = "median"  # Ou 'mean', ou um float como 0.005
-
-# Passamos o modelo JÁ TREINADO (rf_model) e prefit=True
-# O threshold define o corte
-selector_rf = SelectFromModel( rf_model, threshold = threshold_value, prefit = True )
-
-# Aplicar o seletor aos dados codificados
-# Apenas verifica quais colunas passam no threshold
-mask_selected_rf = selector_rf.get_support()
-selected_features_rf_names = X_encoded.columns[ mask_selected_rf ]
-#%%
-# Selecionar as colunas do dataframe para manter os tipos
-X_selected_rf = X[ selected_features_rf_names ].copy()
-
-# Combinar com a coluna alvo
-df_rf = pd.concat( [ X_selected_rf, y ], axis = 1 )
-
-df_rf.shape
-#%%
-# Armazenar para comparação
-datasets_X[ 'RF Importance' ] = X_selected_rf.to_numpy()
-n_features[ 'RF Importance' ] = X_selected_rf.shape[ 1 ]
 #%% md
-# ### 1.4.6 Eliminação Recursiva de Atributos
-#
-# Será aplicado um processo automático que, a cada rodada, elimina uma variável de entrada e avalia como isso afeta a capacidade do modelo de previsão. Ao final, identifica o conjunto de variáveis que oferece o melhor desempenho.
-#
-# Ideia principal:
-# - Montar um classificador robusto (floresta de decisões) que já compensa desequilíbrios entre classes.
-# - Dividir os dados várias vezes (20 “rodadas”), mantendo a proporção de cada classe em cada divisão, para testar estabilidade.
-# - Em cada rodada, remover sistematicamente uma variável diferente e medir a performance.
-# - Repetir até atingir um número mínimo de variáveis.
-# - Escolher o ponto em que o modelo atingiu sua maior média de acurácia nas rodadas de teste.
-#%%
-# Aproveitando o modelo do Random Florest criando antes
-estimator = rf_model
-
-# Estratégia de Validação Cruzada
-# StratifiedKFold mantém a proporção das classes em cada fold, bom para classificação.
-cv_strategy = StratifiedKFold(
-        n_splits = 10,  # Número de folds
-        shuffle = True,  # Embaralhar os dados antes de dividir
-        random_state = 42
-)
-
-# Métrica para avaliar o "time" em cada "jogo de teste"
-# 'accuracy': Acurácia geral
-# 'f1_weighted': Média F1 ponderada pelas classes
-# 'roc_auc': Área sob a curva ROC (bom para classificação binária)
-scoring_metric = 'accuracy'
-
-# Número mínimo de features a manter (para não acabar com zero)
-min_features = max( 1, min( 5, X_encoded.shape[ 1 ] // 2 ) )
-
-# Instanciar o RFECV
-rfecv_selector = RFECV(
-        estimator = estimator,  # O modelo "técnico"
-        step = 1,  # Remover 1 feature por vez
-        cv = cv_strategy,  # A estratégia de validação cruzada
-        scoring = scoring_metric,  # A métrica para avaliar o desempenho
-        min_features_to_select = min_features,  # Número mínimo de features
-        n_jobs = -1  # Usar todos os processadores para paralelizar a CV
-)
-
-rfecv_selector.fit( X_encoded, y_encoded )
-#%%
-optimal_n_features = rfecv_selector.n_features_
-selected_features_mask_rfe = rfecv_selector.support_  # Máscara booleana das features selecionadas
-selected_features_rfe_names = X_encoded.columns[ selected_features_mask_rfe ]
-
-# Visualizar o resultado da validação cruzada
-# Isso mostra como o score da métrica variou conforme o número de features foi mudando
-if hasattr( rfecv_selector, 'cv_results_' ):
-    try:
-        # Obter os scores médios e desvios padrão da validação cruzada
-        mean_scores = rfecv_selector.cv_results_[ 'mean_test_score' ]
-        std_scores = rfecv_selector.cv_results_[ 'std_test_score' ]
-        # Número de features correspondente a cada score
-        n_features_tested = range(
-                rfecv_selector.min_features_to_select,
-                len( mean_scores ) + rfecv_selector.min_features_to_select
-        )
-
-        plt.figure( figsize = (12, 7) )
-        plt.xlabel( "Número de Features Selecionadas" )
-        plt.ylabel( f"Score Médio CV ({scoring_metric})" )
-        plt.errorbar(
-                n_features_tested, mean_scores, yerr = std_scores, fmt = '-o', capsize = 3, ecolor = 'lightgray',
-                elinewidth = 1
-        )
-        plt.title( "RFECV: Desempenho vs Número de Features" )
-
-        # Marcar o ponto ótimo
-        optimal_idx = optimal_n_features - rfecv_selector.min_features_to_select
-        if 0 <= optimal_idx < len( mean_scores ):
-            plt.plot(
-                    optimal_n_features, mean_scores[ optimal_idx ], 'r*', markersize = 10,
-                    label = f'Ótimo ({optimal_n_features} features, Score: {mean_scores[ optimal_idx ]:.4f})'
-            )
-            plt.axvline( x = optimal_n_features, color = 'red', linestyle = '--', alpha = 0.7 )
-        else:
-            print(
-                    f"Aviso: Índice ótimo ({optimal_idx}) fora do range dos scores. Não foi possível marcar o ponto ótimo no gráfico."
-            )
-
-        plt.legend( loc = 'best' )
-        plt.grid( True, linestyle = '--', alpha = 0.6 )
-        plt.show()
-
-    except KeyError as e:
-        print(
-                f"Erro ao acessar 'cv_results_' para plotagem (KeyError: {e}). Verifique a versão do scikit-learn ou os resultados do RFECV."
-        )
-    except Exception as e:
-        print( f"Ocorreu um erro inesperado ao gerar o gráfico de CV: {e}" )
-else:
-    print( "Atributo 'cv_results_' não encontrado no seletor RFECV. Não é possível gerar o gráfico." )
-
-#%%
-# Selecionar as colunas do dataframe
-X_selected_rfe = X[ selected_features_rfe_names ].copy()
-
-# Combinar com a coluna alvo
-df_rfe = pd.concat( [ X_selected_rfe, y ], axis = 1 )
-
-df_rfe.shape
-#%%
-# Armazenar para comparação
-datasets_X[ 'RFE' ] = X_selected_rfe.to_numpy()
-n_features[ 'RFE' ] = X_selected_rfe.shape[ 1 ]
-#%% md
-# ### 1.4.7 Análise de Componentes Principais (PCA)
-#
+# ### 1.4.6 Análise de Componentes Principais (PCA)
+# 
 # Será aplicada uma técnica que transforma as variáveis originais em um novo conjunto de variáveis não correlacionadas — os componentes principais — que retêm o máximo possível da variabilidade dos dados originais. O número de componentes será definido automaticamente com base em um critério de variância explicada.
-#
-# Ideia principal
-# - Reduzir a dimensionalidade do conjunto de dados mantendo o máximo de informação possível.
-# - Aplicar pré-processamento apropriado para garantir que todas as variáveis tenham contribuição balanceada.
-# - Calcular todos os componentes principais inicialmente, apenas para analisar a variância explicada.
-# - Selecionar automaticamente o número de componentes com base em um critério de variância explicada.
-# - Obter um novo conjunto de variáveis transformadas (componentes principais) para uso posterior.
 #%%
-from sklearn.preprocessing import StandardScaler  # Apenas StandardScaler é necessário para X
-from sklearn.decomposition import PCA
-
-# Escalonar todas as features em X
-scaler = StandardScaler()
-X_scaled = scaler.fit_transform( X )  # Aplica o escalonamento a todas as colunas de X
-
-# Note que PCA funciona diretamente com o array NumPy X_scaled
-X_scaled_df = pd.DataFrame( X_scaled, index = X.index, columns = X.columns )
-
-# Instanciar e ajustar o PCA inicialmente sem definir n_components
-# Isso calcula todos os componentes possíveis e sua variância explicada.
-# Usamos X_scaled (o array NumPy) que é o resultado do scaler.
-pca_full = PCA( random_state = 42 )
-pca_full.fit( X_scaled )
-#%%
-# Analisar a Variância Explicada
-explained_variance_ratio = pca_full.explained_variance_ratio_
-cumulative_explained_variance = np.cumsum( explained_variance_ratio )
-
-print( f"\nNúmero total de componentes principais possíveis: {len( explained_variance_ratio )}" )
-
-# Plotar a variância explicada cumulativa (Scree Plot)
-plt.figure( figsize = (10, 6) )
-plt.plot(
-        range( 1, len( cumulative_explained_variance ) + 1 ), cumulative_explained_variance, marker = 'o',
-        linestyle = '--'
-)
-plt.title( 'Variância Explicada Cumulativa pelos Componentes Principais' )
-plt.xlabel( 'Número de Componentes Principais' )
-plt.ylabel( 'Variância Explicada Cumulativa (%)' )
-plt.grid( True, linestyle = '--', alpha = 0.7 )
-
-# Adicionar linhas de referência (ex: 95% e 99% da variância)
-plt.axhline( y = 0.95, color = 'r', linestyle = '-', linewidth = 1, label = '95% Variância Explicada' )
-plt.axhline( y = 0.99, color = 'g', linestyle = ':', linewidth = 1, label = '99% Variância Explicada' )
-
-# Adicionar anotação para o número de componentes em 95%
 try:
-    n_components_95 = np.argmax( cumulative_explained_variance >= 0.95 ) + 1
-    # Verifica se n_components_95 está dentro dos limites do eixo X antes de plotar o texto/ponto
-    if n_components_95 <= len( cumulative_explained_variance ):
-        plt.text(
-                n_components_95 + 0.5, cumulative_explained_variance[ n_components_95 - 1 ] - 0.02,
-                f'{n_components_95} comps.', color = 'red', ha = 'left', va = 'top'
-        )
-        plt.scatter(
-                n_components_95, cumulative_explained_variance[ n_components_95 - 1 ], c = 'red', s = 50,
-                zorder = 5
-        )  # Marca o ponto
-        print( f"Número de componentes para explicar >= 95% da variância: {n_components_95}" )
-    else:
-        print( "Threshold de 95% não alcançado ou alcançado apenas com todos os componentes." )
-except IndexError:
-    print( "Não foi possível calcular n_components para 95%." )
+    X_train
+    y_train
+    X_test
+    y_test
+except NameError:
+    print( "ERRO: Conjuntos de treino/teste não definidos. Execute a divisão `train_test_split` primeiro." )
 
-plt.ylim( min( cumulative_explained_variance ) - 0.05, 1.05 )  # Ajuste o limite inferior do eixo Y dinamicamente
-plt.xlim( 0, len( cumulative_explained_variance ) + 1 )  # Limite do eixo X
-plt.legend( loc = 'best' )
-plt.tight_layout()
-plt.show()
+print( "\n--- Configurando Componentes para PCA ---" )
 
-#%%
-# Escolher o número de componentes (n_components)
+# Definir o método para escolher n_components
 variance_threshold = 0.95
-n_components_chosen = np.argmax( cumulative_explained_variance >= variance_threshold ) + 1
+n_components_pca = variance_threshold
+print( f"Método PCA: Reter {n_components_pca:.0%} da variância." )
 
-# Certifique-se que n_components_chosen não seja 0 se o primeiro componente já atingir o limiar
-if n_components_chosen == 0 and cumulative_explained_variance[ 0 ] >= variance_threshold:
-    n_components_chosen = 1
-# Ou escolha um número fixo se preferir: n_components_chosen = 30
-
-# 5. Aplicar PCA com o número de componentes escolhido
-pca_final = PCA( n_components = n_components_chosen, random_state = 42 )
-# Usa X_scaled (dados escalados) para o fit_transform final
-X_pca = pca_final.fit_transform( X_scaled )
-#%%
-# Criar o DataFrame final com os Componentes Principais
-pc_columns = [ f'PC{i + 1}' for i in range( n_components_chosen ) ]
-X_pca_df = pd.DataFrame( X_pca, index = X.index, columns = pc_columns )
-
-# Combinar os componentes principais com a variável alvo y
-df_pca = pd.concat( [ X_pca_df, y.reset_index( drop = True ) ], axis = 1 )
-
-df_pca.shape
-#%%
-# Armazenar resultado (já é NumPy array numérico)
-datasets_X[ 'PCA' ] = X_pca
-n_features[ 'PCA' ] = X_pca.shape[ 1 ]
-#%% md
-# ### 1.4.8 Análise Discriminante Linear (LDA)
-#
-# Será aplicada a técnica de Análise Discriminante Linear sobre os dados escalados. O objetivo principal é encontrar um novo espaço de menor dimensão no qual as classes sejam mais facilmente separáveis. Isso é feito projetando os dados sobre eixos que maximizam a separação entre as classes com base em variância entre e dentro das classes.
-#
-# Ideia principal
-# - A LDA encontra combinações lineares das variáveis que melhor separam as classes.
-# - O número máximo de componentes possíveis é limitado pelo número de classes (n_classes - 1) e pelo número de variáveis (n_features).
-# - Após a transformação, cada componente discriminante representa um eixo que maximiza a razão entre variância entre classes e variância intra-classe.
-# - Também é possível visualizar a variância explicada por cada componente, o que ajuda a entender a contribuição de cada eixo para a separação das classes.
-#%%
-from sklearn.discriminant_analysis import LinearDiscriminantAnalysis  # Import LDA
-
-y_1d = y
-
-n_classes = y_1d.nunique()
-n_features_lda = X_scaled.shape[ 1 ]
-print( f"Número de classes únicas em y: {n_classes}" )
-
-# Determinar o número de componentes para LDA.
-max_lda_components = min( n_features_lda, n_classes - 1 )
-n_components_lda = max_lda_components
-
-# Instanciar e ajustar o LDA
-lda = LinearDiscriminantAnalysis( n_components = n_components_lda )
-
-# Ajustar e transformar os dados escalados (X_scaled) usando y_1d
-X_lda = lda.fit_transform( X_scaled, y_1d )
-
-print( f"\nShape dos dados após LDA ({n_components_lda} componentes): {X_lda.shape}" )
-
-# Verificar a variância explicada
+# Analisar a variância no treino
 try:
-    explained_variance_ratio_lda = lda.explained_variance_ratio_
-    print( f"Razão da variância (entre classes) explicada pelos componentes LDA: {explained_variance_ratio_lda}" )
-    print( f"Razão da variância cumulativa: {np.cumsum( explained_variance_ratio_lda )}" )
+    # Usaremos um pipeline temporário SÓ para esta análise
+    pipeline_pca_analysis = Pipeline(
+            [
+                ('scaler', StandardScaler()),
+                ('pca', PCA( random_state = 42 ))  # PCA com todos componentes
+            ] )
+    pipeline_pca_analysis.fit( X_train, y_train )
 
-    # Plot opcional da variância explicada pelo LDA
+    pca_fitted_analysis = pipeline_pca_analysis.named_steps[ 'pca' ]
+    cumulative_variance = np.cumsum( pca_fitted_analysis.explained_variance_ratio_ )
+    n_comp_needed_train = np.argmax( cumulative_variance >= variance_threshold ) + 1
+
+    print(
+            f"--> Análise no Treino: {n_comp_needed_train} componentes necessários para >= {variance_threshold:.0%} da variância." )
+
+    # Plotar
     plt.figure( figsize = (8, 5) )
-    plt.bar(
-            range( 1, n_components_lda + 1 ), explained_variance_ratio_lda, alpha = 0.7, align = 'center',
-            label = 'Variância Individual'
-    )
-    plt.step(
-            range( 1, n_components_lda + 1 ), np.cumsum( explained_variance_ratio_lda ), where = 'mid',
-            label = 'Variância Cumulativa'
-    )
-    plt.ylabel( 'Razão da Variância Explicada' )
-    plt.xlabel( 'Componente Discriminante Linear' )
-    plt.title( 'Variância Explicada pelos Componentes LDA' )
-    plt.xticks( range( 1, n_components_lda + 1 ) )
+    plt.plot( range( 1, len( cumulative_variance ) + 1 ), cumulative_variance, marker = '.', linestyle = '--' )
+    plt.title( f'PCA - Variância Explicada Acumulada (Treino)' )
+    plt.xlabel( 'Número de Componentes Principais' )
+    plt.ylabel( 'Variância Acumulada' )
+    plt.axhline(
+            y = variance_threshold, color = 'r', linestyle = '-', lw = 1,
+            label = f'{variance_threshold:.0%} Variância' )
+    plt.axvline( x = n_comp_needed_train, color = 'r', linestyle = ':', lw = 1, label = f'{n_comp_needed_train} Comp.' )
+    plt.xlim( 0, min( len( cumulative_variance ) + 1, n_comp_needed_train * 2 if n_comp_needed_train > 10 else 100 ) )
+    plt.grid( True, alpha = 0.5 )
     plt.legend( loc = 'best' )
-    plt.grid( True, axis = 'y', linestyle = '--', alpha = 0.7 )
     plt.tight_layout()
     plt.show()
+    del pipeline_pca_analysis
 
-except AttributeError:
-    print( "\nNão foi possível obter a variância explicada (pode não estar disponível)." )
+except Exception as e:
+    print( f"Erro durante análise de variância PCA no treino: {e}" )
 
+# Instância do Scaler que precederá o PCA no pipeline final:
+scaler_for_pca_pipeline = StandardScaler()
+
+# Instância do PCA configurada com o threshold de variância:
+pca_transformer_pipeline = PCA( n_components = n_components_pca, random_state = 42 )
+#%% md
+# ### 1.4.7 Análise Discriminante Linear (LDA)
+# 
+# Será aplicada a técnica de Análise Discriminante Linear sobre os dados escalados. O objetivo principal é encontrar um novo espaço de menor dimensão no qual as classes sejam mais facilmente separáveis. Isso é feito projetando os dados sobre eixos que maximizam a separação entre as classes com base em variância entre e dentro das classes.
 #%%
-# Criar o DataFrame final com os Componentes Discriminantes Lineares
-ld_columns = [ f'LD{i + 1}' for i in range( n_components_lda ) ]
-X_lda_df = pd.DataFrame( X_lda, index = X.index, columns = ld_columns )
+try:
+    X_train
+    y_train
+    X_test
+    y_test
+    print( "Usando 'X_train', 'y_train', 'X_test', 'y_test' existentes." )
+except NameError:
+    print( "ERRO: Conjuntos de treino/teste não definidos. Execute a divisão `train_test_split` primeiro." )
 
-# Combinar os componentes LDA com a variável alvo y
-# Usar reset_index(drop=True) em y garante o alinhamento dos índices
-df_lda = pd.concat( [ X_lda_df, y_1d.reset_index( drop = True ) ], axis = 1 )
+# Determinar n_components para LDA
+n_components_lda = None
+try:
+    n_features_train = X_train.shape[ 1 ]
+    # Garante que estamos pegando as classes únicas do CONJUNTO DE TREINO
+    unique_classes_train = np.unique( y_train )
+    n_classes_train = len( unique_classes_train )
 
-df_lda.shape
-#%%
-# Armazenar resultado
-datasets_X[ 'LDA' ] = X_lda
-n_features[ 'LDA' ] = X_lda.shape[ 1 ]
+    print( f"Número de features no treino: {n_features_train}" )
+    print( f"Número de classes únicas no treino: {n_classes_train}" )
+
+    if n_classes_train < 2:
+        print( "ERRO: LDA requer pelo menos 2 classes no conjunto de treino 'y_train'." )
+    else:
+        # Calcular o número máximo/recomendado de componentes
+        n_components_lda = min( n_features_train, n_classes_train - 1 )
+        if n_components_lda <= 0:
+            print(
+                    f"AVISO: Cálculo resultou em n_components_lda = {n_components_lda}. Verifique features/classes. LDA pode não ser aplicável." )
+            # Tratar caso onde n_components é 0 ou negativo (ex: 1 classe ou 0 features)
+        else:
+            print( f"--> LDA será configurado com n_components = {n_components_lda}" )
+
+except NameError:
+    print( "ERRO: 'X_train' ou 'y_train' não definidos." )
+except Exception as e:
+    print( f"ERRO ao determinar n_components para LDA: {e}" )
+    # Tratar erro
+
+# Analisar a variância explicada pelos componentes LDA no treino
+# A "variância" no LDA refere-se à capacidade de separação entre classes.
+if n_components_lda is not None and n_components_lda > 0:  # Prosseguir apenas se n_components for válido
+    try:
+
+        # Pipeline temporário para análise
+        pipeline_lda_analysis = Pipeline(
+                [
+                    ('scaler', StandardScaler()),
+                    ('lda', LinearDiscriminantAnalysis( n_components = n_components_lda ))
+                ] )
+        # Ajustar ao treino (LDA usa y_train)
+        pipeline_lda_analysis.fit( X_train, y_train )
+
+        lda_fitted_analysis = pipeline_lda_analysis.named_steps[ 'lda' ]
+        explained_variance_ratio_lda = lda_fitted_analysis.explained_variance_ratio_
+
+        print(
+                f"--> Razão da variância (separabilidade) explicada pelos {n_components_lda} componentes LDA no treino:" )
+        for i, ratio in enumerate( explained_variance_ratio_lda ):
+            print( f"    LD{i + 1}: {ratio:.4f}" )
+        print( f"    Total: {np.sum( explained_variance_ratio_lda ):.4f}" )
+
+        # Plotar
+        plt.figure( figsize = (8, 5) )
+        component_indices = range( 1, n_components_lda + 1 )
+        plt.bar( component_indices, explained_variance_ratio_lda, alpha = 0.7, label = 'Individual' )
+        plt.plot(
+                component_indices, np.cumsum( explained_variance_ratio_lda ), marker = '.', linestyle = '-',
+                color = 'r',
+                label = 'Cumulativa' )
+        plt.title( 'LDA - Variância Explicada pelos Componentes (Treino)' )
+        plt.xlabel( 'Componente Discriminante Linear' )
+        plt.ylabel( 'Razão da Variância Explicada' )
+        plt.xticks( component_indices )
+        plt.ylim( 0, 1.05 )
+        plt.grid( True, axis = 'y', alpha = 0.5 )
+        plt.legend( loc = 'best' )
+        plt.tight_layout()
+        plt.show()
+        del pipeline_lda_analysis
+
+    except Exception as e:
+        print( f"Erro durante análise opcional de variância LDA no treino: {e}" )
+else:
+    print( "\nAnálise de variância LDA pulada (n_components inválido ou <= 0)." )
+
+lda_transformer_pipeline = None  # Inicializa como None
+scaler_for_lda_pipeline = StandardScaler()  # Scaler sempre pode ser criado
+
+if n_components_lda is not None and n_components_lda > 0:
+    # Instância do LDA:
+    lda_transformer_pipeline = LinearDiscriminantAnalysis( n_components = n_components_lda )
+else:
+    print( "\n--- Configuração LDA Incompleta ---" )
+    print( "ERRO: Não foi possível criar a instância do LDA transformer devido a problema com n_components." )
+    print( "Verifique o número de classes (>=2) e features no conjunto de treino." )
+    print( "O pipeline usando LDA não poderá ser construído." )
 #%% md
 # ## 1.5 Impacto na Dimensionalidade
+#%% md
+# ### 1.5.1 **Avaliação Comparativa dos Pipelines**
+# 
+# Nesta seção, vamos montar os pipelines completos combinando cada técnica de redução de dimensionalidade configurada anteriormente com cada um dos classificadores base. Em seguida, avaliaremos o desempenho de cada pipeline usando validação cruzada (Stratified K-Fold com 10 splits) no conjunto de **treino** (`X_train`, `y_train`). O objetivo é identificar as combinações mais promissoras antes de realizar a avaliação final no conjunto de teste.
 #%%
-from sklearn.neural_network import MLPClassifier
-from sklearn.tree import DecisionTreeClassifier
-from sklearn.svm import SVC
-from sklearn.linear_model import LogisticRegression
-from sklearn.pipeline import Pipeline
-from sklearn.model_selection import cross_val_score
-import time
-
-# Avaliação Comparativa do Impacto da Redução de Dimensionalidade
-
-models_eval = {
-    "Logistic Regression": Pipeline(
-            [
-                ('scaler', StandardScaler()),
-                ('clf', LogisticRegression(
-                        random_state = 42, max_iter = 1000, solver = 'liblinear', class_weight = 'balanced' ))
-            ] ),
-    "Random Forest": Pipeline(
-            [
-                ('clf', RandomForestClassifier(
-                        random_state = 42, n_estimators = 100, class_weight = 'balanced', n_jobs = -1 ))
-            ] ),
-    "SVC": Pipeline(
-            [
-                ('scaler', StandardScaler()),
-                ('clf', SVC( random_state = 42, probability = True, class_weight = 'balanced' ))
-            ] ),
-    "Decision Tree": Pipeline(
-            [
-                ('clf', DecisionTreeClassifier( random_state = 42, class_weight = 'balanced' ))
-            ] ),
-    "MLP": Pipeline(
-            [
-                ('scaler', StandardScaler()),
-                ('clf',
-                 MLPClassifier( random_state = 42, max_iter = 500, hidden_layer_sizes = (100,), early_stopping = True ))
-            ] )
+# Verificar se os dados de treino e os componentes existem
+try:
+    X_train
+    y_train
+    mi_selector  # Adicione verificações para todos os componentes necessários
+    rf_importance_selector
+    rfe_selector
+    scaler_for_pca_pipeline
+    pca_transformer_pipeline
+    scaler_for_lda_pipeline
+except NameError as e:
+    print( f"ERRO FATAL: Variável pré-requisito não definida - {e}. Execute as células anteriores." )
+    raise e  # Levanta o erro para parar o notebook
+#%% md
+# ### 1.5.2 Definir Classificadores Base
+# 
+# Primeiro, definimos instâncias dos modelos de classificação que queremos testar. Usamos `random_state` para reprodutibilidade.
+#%%
+classifiers = {
+    "Logistic Regression": LogisticRegression(
+            random_state = 42, max_iter = 1000, solver = 'liblinear', class_weight = 'balanced' ),
+    "Random Forest": RandomForestClassifier(
+            random_state = 42, n_estimators = 100, class_weight = 'balanced', n_jobs = -1 ),
+    "SVC": SVC( random_state = 42, probability = True, class_weight = 'balanced' ),  # probability=True para roc_auc
+    "Decision Tree": DecisionTreeClassifier( random_state = 42, class_weight = 'balanced' ),
+    "MLP": MLPClassifier( random_state = 42, max_iter = 500, hidden_layer_sizes = (100,), early_stopping = True )
 }
+print( f"Classificadores definidos: {list( classifiers.keys() )}" )
+#%% md
+# ### 1.5.3. Montar os Pipelines Completos
+# 
+# Agora, criamos os pipelines completos. Cada pipeline combinará:
+# 1.  Etapas de pré-processamento/redução (ex: Scaler + PCA, ou Scaler + SelectKBest).
+# 2.  Um Scaler *após* a redução, se o classificador for sensível à escala (LogReg, SVC, MLP) e a etapa anterior não for um scaler.
+# 3.  O classificador final.
+# 
+# Iteramos sobre todas as técnicas de redução configuradas e todos os classificadores base.
 #%%
+pipelines_to_evaluate = { }
 
-# --- Estratégia de Avaliação ---
-cv_strategy_eval = StratifiedKFold( n_splits = 10, shuffle = True, random_state = 42 )
-scoring_metrics_eval = [ 'accuracy', 'f1_weighted', 'roc_auc' ]  # Métricas relevantes
+# Estratégias de redução e seus componentes pré-configurados
+reduction_methods = {
+    "Baseline": [ ],  # Sem redução explícita
+    "MI": [ ('scaler', StandardScaler()), ('selector', mi_selector) ],
+    "RF_Select": [ ('scaler', StandardScaler()), ('selector', rf_importance_selector) ],
+    "RFE": [ ('scaler', StandardScaler()), ('selector', rfe_selector) ],
+    "PCA": [ ('scaler', scaler_for_pca_pipeline), ('transformer', pca_transformer_pipeline) ],
+    "LDA": [ ]
+}
 
-# --- Loop de Avaliação ---
-results_eval = [ ]  # Lista para armazenar os resultados
+# Adicionar LDA apenas se foi criado com sucesso na etapa anterior
+if 'lda_transformer_pipeline' in locals() and lda_transformer_pipeline is not None:
+    reduction_methods[ "LDA" ] = [ ('scaler', scaler_for_lda_pipeline), ('transformer', lda_transformer_pipeline) ]
+    print( "Info: LDA será incluído na avaliação." )
+else:
+    print( "Info: LDA não foi configurado ou falhou, será pulado." )
 
-print( "\nIniciando avaliação comparativa dos modelos com validação cruzada..." )
+# Loop para montar os pipelines
+for reduction_name, reduction_steps in reduction_methods.items():
+    for clf_name, classifier in classifiers.items():
+        pipeline_name = f"{reduction_name}-{clf_name}"
+        pipeline_steps = [ ]
+        pipeline_steps.extend( reduction_steps )  # Adiciona etapas de redução/transformação
 
-# Usar y_final_encoded que já está pronto
-y_target_eval = y_encoded
+        # Adicionar scaler APÓS redução/transformação se necessário para o classificador
+        needs_scaling = clf_name in [ "Logistic Regression", "SVC", "MLP" ]
+        is_baseline = reduction_name == "Baseline"
 
-for data_name, X_data in datasets_X.items():
-    current_n_features = n_features[ data_name ]
-    print( f"\nAvaliando Dataset: '{data_name}' ({current_n_features} features)" )
+        if needs_scaling:
+            if not is_baseline:
+                # Adiciona scaler depois da redução/transformação para modelos sensíveis
+                pipeline_steps.append( (f'scaler_after_{reduction_name.lower()}', StandardScaler()) )
+            else:
+                # Adiciona scaler para o Baseline se o modelo for sensível
+                pipeline_steps.append( ('scaler_baseline', StandardScaler()) )
 
-    # Verificações básicas nos dados
-    if X_data.shape[ 0 ] != len( y_target_eval ):
-        print(
-                f"ERRO CRÍTICO: Disparidade no número de amostras! X_{data_name} tem {X_data.shape[ 0 ]}, y tem {len( y_target_eval )}. Pulando." )
-        continue
-    if np.isnan( X_data ).any():
-        print(
-                f"AVISO CRÍTICO: NaNs encontrados em X_{data_name} ANTES da CV. Preenchendo com 0 para tentar continuar, mas VERIFIQUE O PRÉ-PROCESSAMENTO." )
-        # Estratégia de preenchimento simples para evitar falha total, mas idealmente isso não deveria acontecer aqui.
-        X_data = np.nan_to_num( X_data, nan = 0.0, posinf = 0.0, neginf = 0.0 )
+        # Adicionar o classificador
+        pipeline_steps.append( ('classifier', classifier) )
 
-    for model_name, pipeline in models_eval.items():
-        print( f"  - Modelo: {model_name}" )
-        # Executar validação cruzada para cada métrica
-        for metric in scoring_metrics_eval:
-            start_time_cv = time.time()
-            try:
-                # Verificar se X_data é adequado (ex: LDA pode ter poucas features para alguns modelos)
-                if X_data.shape[ 1 ] == 0:
-                    print( f"    * {metric}: ERRO - Dataset '{data_name}' não possui features. Pulando." )
-                    score_mean, score_std = np.nan, np.nan  # Marcar como NaN
-                elif metric == 'roc_auc' and len( np.unique( y_target_eval ) ) > 2:
-                    # ROC AUC multiclasse precisa de ajustes ou pode não ser padrão no cross_val_score dependendo da versão
-                    # Tentar com OvR (One-vs-Rest) se disponível ou pular
-                    try:
-                        scores = cross_val_score(
-                                pipeline, X_data, y_target_eval, cv = cv_strategy_eval,
-                                scoring = 'roc_auc_ovr_weighted',
-                                n_jobs = -1 )
-                        score_mean = np.mean( scores )
-                        score_std = np.std( scores )
-                    except ValueError:
-                        print(
-                                f"    * {metric} (multiclass): Não foi possível calcular 'roc_auc_ovr_weighted'. Pulando métrica." )
-                        score_mean, score_std = np.nan, np.nan
-                else:
-                    scores = cross_val_score(
-                            pipeline, X_data, y_target_eval, cv = cv_strategy_eval, scoring = metric, n_jobs = -1 )
-                    score_mean = np.mean( scores )
-                    score_std = np.std( scores )
+        # Criar e armazenar
+        final_pipeline = Pipeline( steps = pipeline_steps )
+        pipelines_to_evaluate[ pipeline_name ] = final_pipeline
 
-                end_time_cv = time.time()
-
-                # Armazenar resultado apenas se o cálculo foi bem-sucedido
-                if pd.notna( score_mean ):
-                    results_eval.append(
-                            {
-                                'Dataset': data_name,
-                                'Num Features': current_n_features,
-                                'Model': model_name,
-                                'Metric': metric,
-                                'Mean Score': score_mean,
-                                'Std Score': score_std,
-                                'CV Time (s)': end_time_cv - start_time_cv
-                            } )
-                    print(
-                            f"    * {metric}: {score_mean:.4f} +/- {score_std:.4f} (Tempo: {end_time_cv - start_time_cv:.2f}s)" )
-                else:
-                    # Registrar que não foi possível calcular
-                    results_eval.append(
-                            {
-                                'Dataset': data_name,
-                                'Num Features': current_n_features,
-                                'Model': model_name,
-                                'Metric': metric,
-                                'Mean Score': np.nan,
-                                'Std Score': np.nan,
-                                'CV Time (s)': end_time_cv - start_time_cv
-                            } )
-
-
-            except ValueError as ve:
-                print(
-                        f"    ERRO de ValueError durante CV para {model_name} com métrica {metric} (verifique dados/parâmetros): {ve}" )
-                # Registrar falha
-                results_eval.append(
-                        { 'Dataset': data_name, 'Num Features': current_n_features, 'Model': model_name,
-                          'Metric': metric, 'Mean Score': np.nan, 'Std Score': np.nan,
-                          'CV Time (s)': time.time() - start_time_cv } )
-            except Exception as e:
-                print( f"    ERRO inesperado durante CV para {model_name} com métrica {metric}: {e}" )
-                # Registrar falha
-                results_eval.append(
-                        { 'Dataset': data_name, 'Num Features': current_n_features, 'Model': model_name,
-                          'Metric': metric, 'Mean Score': np.nan, 'Std Score': np.nan,
-                          'CV Time (s)': time.time() - start_time_cv } )
-
-print( "\nAvaliação comparativa concluída." )
-
+print( f"\nTotal de {len( pipelines_to_evaluate )} pipelines montados." )
+#%% md
+# ### 1.5.4 Definir Estratégia de Validação Cruzada e Métricas
+# 
+# Configuramos o `StratifiedKFold` com 10 splits para a validação cruzada, garantindo a proporção das classes em cada fold. Definimos também as métricas que queremos calcular (Accuracy, F1-Weighted, ROC AUC).
 #%%
-if results_eval:
-    results_eval_df = pd.DataFrame( results_eval )
+n_cv_splits = 10
+# random_state garante que os splits sejam os mesmos em diferentes execuções
+cv_strategy = StratifiedKFold( n_splits = n_cv_splits, shuffle = True, random_state = 42 )
 
-    # Gerar Gráficos de Barras Comparativos
-    print( "\n--- Gráficos Comparativos de Desempenho ---" )
-    for metric in scoring_metrics_eval:
-        plt.figure( figsize = (15, 8) )  # Aumentado o tamanho
+# Dicionário de métricas para avaliação
+scoring = {
+    'accuracy': 'accuracy',
+    'f1_weighted': 'f1_weighted',
+    'roc_auc': 'roc_auc'
+}
+print( f"Estratégia de CV: StratifiedKFold com {n_cv_splits} splits." )
+print( f"Métricas: {list( scoring.keys() )}" )
+#%% md
+# ### 1.5.5 Executar Avaliação com Validação Cruzada
+# 
+# Este é o passo principal onde cada pipeline é avaliado usando validação cruzada no conjunto de treino (`X_train`, `y_train`).
+# - Calculamos as métricas de resumo (Accuracy, F1-Weighted, ROC AUC) usando `cross_val_score` para obter a média e o desvio padrão entre os 10 folds.
+# - Usamos `cross_val_predict` para obter as previsões de cada amostra (quando estava no fold de teste) e calculamos uma **Matriz de Confusão** agregada para cada pipeline.
+# 
+# **Atenção:** Esta célula pode levar um tempo considerável para executar.
+#%%
+results_list = [ ]
+# Dicionário para armazenar as matrizes de confusão separadamente
+# confusion_matrices_cv = {}
+start_time_total = time.time()
 
-        # Filtrar dados para a métrica atual e remover NaNs no score para plotagem
-        metric_df = results_eval_df[
-            (results_eval_df[ 'Metric' ] == metric) & (results_eval_df[ 'Mean Score' ].notna()) ].copy()
+for name, pipeline in pipelines_to_evaluate.items():
+    start_time_pipeline = time.time()
+    print( f"Avaliando: {name}..." )
+    reduction_name_res = name.split( '-' )[ 0 ]
+    clf_name_res = name.split( '-' )[ 1 ]
 
-        # Ordenar os datasets pela quantidade de features para o eixo X
-        # Criar uma ordem baseada no dicionário n_features
-        ordered_datasets = sorted(
-                metric_df[ 'Dataset' ].unique(), key = lambda x: n_features.get( x, float( 'inf' ) ) )
-        metric_df[ 'Dataset' ] = pd.Categorical( metric_df[ 'Dataset' ], categories = ordered_datasets, ordered = True )
-        metric_df.sort_values( by = [ 'Dataset', 'Model' ], inplace = True )  # Ordenar para consistência
+    pipeline_scores = { }
+    cm_calculated = False  # Flag para saber se a matriz foi calculada
 
-        if not metric_df.empty:
+    # Calcular Métricas de Resumo (Média/Desvio Padrão)
+    for metric_name, scorer in scoring.items():
+        try:
+            scores = cross_val_score(
+                    pipeline, X_train, y_train,
+                    cv = cv_strategy, scoring = scorer, n_jobs = -1 )
+            pipeline_scores[ f'Mean {metric_name}' ] = np.mean( scores )
+            pipeline_scores[ f'Std {metric_name}' ] = np.std( scores )
+            print( f"  - {metric_name}: {np.mean( scores ):.4f} +/- {np.std( scores ):.4f}" )
+        except Exception as e:
+            print( f"  - ERRO ao calcular {metric_name} para {name}: {e}" )
+            pipeline_scores[ f'Mean {metric_name}' ] = np.nan
+            pipeline_scores[ f'Std {metric_name}' ] = np.nan
 
-            # Usando barplot diretamente para mais controle sobre eixos
-            ax = sns.barplot(
-                    data = metric_df, x = 'Dataset', y = 'Mean Score', hue = 'Model', palette = 'viridis',
-                    order = ordered_datasets )
-            ax.set_title( f'Comparação de Desempenho ({metric.capitalize()}) por Técnica de Redução' )
-            ax.set_ylabel( f'Score Médio ({metric}) na Validação Cruzada' )
-            ax.set_xlabel( 'Técnica de Redução / Dataset (# Features)' )
-            # Adicionar número de features ao label do eixo x
-            xtick_labels = [ f"{ds}\n({n_features.get( ds, '?' )} feats)" for ds in ordered_datasets ]
-            ax.set_xticklabels( xtick_labels, rotation = 45, ha = 'right' )
-            ax.legend( title = 'Modelo', bbox_to_anchor = (1.02, 1), loc = 'upper left' )
-            ax.grid( axis = 'y', linestyle = '--', alpha = 0.7 )
-            plt.tight_layout( rect = [ 0, 0, 0.9, 1 ] )  # Ajustar layout para legenda fora
+    # Calcular Matriz de Confusão Agregada via CV
+    try:
+        print( f"    Calculando predições CV para Matriz de Confusão..." )
+        # Obter previsões usando validação cruzada
+        y_pred_cv = cross_val_predict( pipeline, X_train, y_train, cv = cv_strategy, n_jobs = -1 )
+
+        # Calcular a matriz de confusão comparando as previsões CV com os rótulos reais do treino
+        cm = confusion_matrix( y_train, y_pred_cv )
+        print( f"    Matriz de Confusão (CV Agregada):\n{cm}" )
+        # Guardar a matriz no dicionário de resultados
+        pipeline_scores[ 'Confusion Matrix (CV)' ] = cm
+        cm_calculated = True  # Marca que foi calculada
+
+    except Exception as e_cm:
+        print( f"    * ERRO ao calcular Matriz de Confusão via cross_val_predict: {e_cm}" )
+        pipeline_scores[ 'Confusion Matrix (CV)' ] = None  # Indica falha
+
+    end_time_pipeline = time.time()
+    # Adicionar informações do pipeline, tempo e flag da CM
+    pipeline_scores.update(
+            {
+                'Pipeline': name,
+                'Reduction': reduction_name_res,
+                'Classifier': clf_name_res,
+                'Time (s)': end_time_pipeline - start_time_pipeline,
+                'CM Calculated': cm_calculated
+            } )
+    results_list.append( pipeline_scores )
+    print( f"  --> Concluído em {end_time_pipeline - start_time_pipeline:.2f}s" )
+
+end_time_total = time.time()
+print( f"\nValidação Cruzada TOTAL Concluída em {end_time_total - start_time_total:.2f} segundos." )
+#%% md
+# ### 1.5.6 Organizar e Exibir Resultados Tabulares
+# 
+# Compilamos os resultados da validação cruzada em um DataFrame do Pandas. Ordenamos pela acurácia média. A matriz de confusão calculada para cada pipeline foi impressa durante o loop anterior, mas não será exibida diretamente na tabela abaixo para manter a clareza (a coluna `CM Calculated` indica se o cálculo foi bem-sucedido).
+#%%
+if results_list:
+    results_df = pd.DataFrame( results_list )
+
+    # Define a ordem desejada das colunas, incluindo 'CM Calculated'
+    # Excluindo a coluna da matriz em si ('Confusion Matrix (CV)') da exibição padrão
+    cols_order = [ 'Pipeline', 'Reduction', 'Classifier',
+                   'Mean accuracy', 'Std accuracy',
+                   'Mean f1_weighted', 'Std f1_weighted',
+                   'Mean roc_auc', 'Std roc_auc',
+                   'CM Calculated', 'Time (s)' ]
+    # Filtrar colunas existentes
+    cols_order_existing = [ col for col in cols_order if col in results_df.columns ]
+    results_df = results_df[ cols_order_existing ]
+
+    # Ordena pela acurácia média
+    if 'Mean accuracy' in results_df.columns:
+        # Tratar NaNs antes de ordenar para evitar erros em algumas versões do pandas
+        results_df[ 'Mean accuracy' ] = pd.to_numeric( results_df[ 'Mean accuracy' ], errors = 'coerce' )
+        results_df = results_df.sort_values( by = 'Mean accuracy', ascending = False, na_position = 'last' )
+    else:
+        print( "AVISO: Coluna 'Mean accuracy' não encontrada para ordenação." )
+
+    print( "\n--- Resultados Consolidados (Ordenados por Acurácia Média no Treino) ---" )
+    pd.set_option( 'display.max_rows', 100 )
+    pd.set_option( 'display.max_columns', None )
+    pd.set_option( 'display.width', 1000 )
+    pd.set_option( 'display.float_format', '{:.4f}'.format )
+
+    print( results_df )
+
+else:
+    print( "\nERRO: Nenhum resultado foi coletado na lista 'results_list'. Verifique o loop de avaliação." )
+#%% md
+# ### 1.5.7 Visualizar Resultados Gráficos
+# 
+# Geramos gráficos de barras para comparar visualmente o desempenho médio (Accuracy, F1-Weighted, ROC AUC) dos diferentes classificadores para cada técnica de redução de dimensionalidade. Isso ajuda a identificar padrões e tendências nos resultados.
+#%%
+if 'results_df' in locals() and not results_df.empty:
+    # Métricas que queremos plotar
+    metrics_to_plot = [ 'accuracy', 'f1_weighted', 'roc_auc' ]
+
+    for metric in metrics_to_plot:
+        mean_col = f'Mean {metric}'  # Nome da coluna da média
+        # Verifica se a coluna da métrica existe nos resultados
+        if mean_col not in results_df.columns:
+            print( f"\nMétrica '{metric}' não encontrada nos resultados. Pulando plot." )
+            continue
+
+        # Remove linhas onde a métrica é NaN (caso tenha ocorrido erro na CV)
+        plot_df = results_df.dropna( subset = [ mean_col ] )
+        if plot_df.empty:
+            print( f"\nSem dados válidos para plotar para a métrica '{metric}'." )
+            continue
+
+        # Ordenar por método de redução para o gráfico ficar consistente
+        plot_df = plot_df.sort_values( by = [ 'Reduction', 'Classifier' ] )
+
+        plt.figure( figsize = (18, 8) )
+        # Cria o gráfico de barras
+        sns.barplot(
+                data = plot_df,
+                x = 'Reduction',  # Agrupa por técnica de redução no eixo X
+                y = mean_col,  # Eixo Y é o score médio da métrica
+                hue = 'Classifier',  # Barras coloridas por classificador
+                palette = 'viridis' )  # Esquema de cores
+
+        plt.title( f'Comparação de Desempenho ({metric.upper()}) por Técnica de Redução (CV no Treino)' )
+        plt.ylabel( f'Score Médio ({metric})' )
+        plt.xlabel( 'Técnica de Redução de Dimensionalidade' )
+        plt.xticks( rotation = 15, ha = 'right' )  # Rotação leve nos nomes do eixo X
+        plt.legend( title = 'Classificador', bbox_to_anchor = (1.02, 1), loc = 'upper left' )  # Legenda fora do plot
+        plt.grid( axis = 'y', linestyle = '--', alpha = 0.6 )  # Grade horizontal
+        plt.tight_layout( rect = [ 0, 0, 0.9, 1 ] )  # Ajusta layout para caber legenda
+        plt.show()
+else:
+    print( "\nDataFrame de resultados 'results_df' não encontrado ou vazio. Não é possível gerar gráficos." )
+#%% md
+# ## 1.6 Análise do Melhor Pipeline
+# 
+# Analisando os resultados da validação cruzada realizada no conjunto de treino:
+# 
+# 1.  **Melhor Desempenho Geral:** O pipeline **`LDA-SVC`** apresentou o melhor desempenho, liderando tanto em **Acurácia Média (`Mean accuracy` ≈ 0.6358)** quanto em **F1-Score Ponderado (`Mean f1_weighted` ≈ 0.6336)**.
+# 2.  **Competidores Fortes:**
+#     * **`LDA-Logistic Regression`**: Ficou muito próximo em Acurácia/F1 e apresentou um **ROC AUC médio ligeiramente superior (`Mean roc_auc` ≈ 0.6762)**, além de ser computacionalmente mais rápido.
+#     * **`LDA-MLP`**: Também mostrou bom desempenho, destacando-se com o **maior ROC AUC médio (`Mean roc_auc` ≈ 0.6782)** entre os primeiros colocados.
+# 3.  **Fator Chave:** A técnica de redução de dimensionalidade **LDA** foi claramente a mais eficaz para este conjunto de dados e modelos, pois os três melhores pipelines a utilizaram. Isso sugere que transformar as features para maximizar a separabilidade linear entre as classes foi benéfico.
+# 4.  **Conclusão:** Com base principalmente na Acurácia e F1-Score, **`LDA-SVC`** pode ser considerado o melhor pipeline resultante desta avaliação no conjunto de treino. No entanto, `LDA-Logistic Regression` é uma alternativa muito forte e mais rápida, com um AUC ligeiramente melhor. A escolha final pode depender da métrica prioritária e da avaliação no conjunto de teste.
+#%% md
+# # 2. Análise de Agrupamento
+#%% md
+# ## 2.1 Clustering
+# 
+# Nesta seção, aplicaremos técnicas de clustering não supervisionado para identificar grupos (clusters) inerentes nos dados radiômicos, sem utilizar os rótulos de classe originais. O objetivo é ver se os dados se separam naturalmente em grupos com base apenas nas suas características.
+# 
+# **Passos:**
+# 1.  Preparar os dados: Selecionar as features relevantes e escaloná-las.
+# 2.  Aplicar K-Means: Determinar um número `k` de clusters e agrupar os dados.
+# 3.  Aplicar Clustering Hierárquico: Construir uma hierarquia de clusters e visualizar com um dendrograma.
+#%%
+print( "--- Preparando Dados para Clustering ---" )
+
+try:
+    df
+    # Pegar o nome da coluna alvo (última coluna)
+    print( f"Coluna alvo a ser ignorada: '{target_column_name}'" )
+
+    # Separar as features (X)
+    X_clustering = df.drop( columns = [ target_column_name ] )
+
+    # Garantir que temos apenas features numéricas
+    X_numeric_clustering = X_clustering.select_dtypes( include = np.number )
+    if X_numeric_clustering.shape[ 1 ] < X_clustering.shape[ 1 ]:
+        print(
+                f"AVISO: Usando apenas as {X_numeric_clustering.shape[ 1 ]} colunas numéricas de {X_clustering.shape[ 1 ]} para clustering." )
+    print( f"Dimensões dos dados para clustering: {X_numeric_clustering.shape}" )
+
+    # Escalonar os dados (ESSENCIAL para K-Means e útil para Hierárquico com distância Euclidiana)
+    scaler_clustering = StandardScaler()
+    X_scaled_clustering = scaler_clustering.fit_transform( X_numeric_clustering )
+    print( "Dados escalonados (média 0, desvio padrão 1)." )
+
+except NameError:
+    print( "ERRO: DataFrame 'df' não encontrado. Certifique-se que ele existe após a limpeza inicial." )
+except Exception as e:
+    print( f"ERRO na preparação dos dados: {e}" )
+#%% md
+# ## 2.1.1 K-Means Clustering
+# 
+# K-Means tenta particionar os dados em `k` clusters distintos, onde cada ponto pertence ao cluster cujo centroide (média) está mais próximo. Um passo crucial é escolher o número `k` de clusters. Usaremos o **Método do Cotovelo (Elbow Method)** para nos ajudar a visualizar uma boa escolha para `k`. Calculamos a soma dos quadrados intra-cluster (WCSS ou inertia) para diferentes valores de `k` e procuramos um "cotovelo" no gráfico, onde adicionar mais clusters não diminui a WCSS tão drasticamente.
+#%%
+print( "\n--- K-Means: Método do Cotovelo ---" )
+
+if 'X_scaled_clustering' in locals():
+    wcss = [ ]
+    k_range = range( 1, 400, 4 )
+
+    for k in k_range:
+        kmeans_elbow = KMeans(
+                n_clusters = k,
+                init = 'k-means++',  # Método inteligente de inicialização
+                n_init = 'auto',  # Número de inicializações (padrão moderno)
+                max_iter = 300,  # Máximo de iterações por run
+                random_state = 42 )
+        kmeans_elbow.fit( X_scaled_clustering )
+        wcss.append( kmeans_elbow.inertia_ )  # inertia_ é o WCSS
+
+    # Plotar o gráfico do cotovelo
+    plt.figure( figsize = (20, 6) )
+    plt.plot( k_range, wcss, marker = 'o', linestyle = '--' )
+    plt.title( 'Método do Cotovelo (Elbow Method) para K-Means' )
+    plt.xlabel( 'Número de Clusters (k)' )
+    plt.ylabel( 'WCSS (Inertia)' )
+    plt.xticks( k_range )
+    plt.grid( True )
+    plt.show()
+else:
+    print( "ERRO: Dados escalados 'X_scaled_clustering' não disponíveis." )
+#%% md
+# **Interpretação do Cotovelo:** O gráfico acima mostra como a soma dos quadrados dentro dos clusters (WCSS) diminui à medida que aumentamos `k`. O "cotovelo" é o ponto onde a taxa de diminuição se torna menos acentuada. Se houver um cotovelo claro (ex: em k=2 ou k=3), esse é um bom candidato para o número de clusters. Se a linha diminuir suavemente, pode indicar que os clusters não são bem definidos ou que o K-Means não é o algoritmo ideal.
+# 
+# Vamos agora aplicar o K-Means com um `k` escolhido (baseado no cotovelo ou no conhecimento prévio do problema - por exemplo, `k=2` por causa das classes originais).
+#%%
+print( "\n--- K-Means: Aplicação Final ---" )
+
+chosen_k = 2
+
+if 'X_scaled_clustering' in locals():
+    print( f"Aplicando K-Means com k = {chosen_k}..." )
+    kmeans_final = KMeans(
+            n_clusters = chosen_k,
+            init = 'k-means++',
+            n_init = 'auto',
+            max_iter = 300,
+            random_state = 42 )
+    # Treinar e obter os rótulos dos clusters
+    kmeans_labels = kmeans_final.fit_predict( X_scaled_clustering )
+
+    df_clustered = df.copy()  # Trabalhar numa cópia
+    df_clustered[ 'KMeans_Cluster' ] = kmeans_labels
+
+    print( f"Rótulos K-Means (k={chosen_k}) adicionados ao DataFrame 'df_clustered'." )
+    # Mostrar a contagem de pontos em cada cluster
+    print( "\nContagem de amostras por Cluster K-Means:" )
+    print( pd.Series( kmeans_labels ).value_counts().sort_index() )
+
+else:
+    print( "ERRO: Dados escalados 'X_scaled_clustering' não disponíveis." )
+#%% md
+# # 2.2. Clustering Hierárquico Aglomerativo
+# 
+# O Clustering Hierárquico constrói (ou decompõe) uma hierarquia de clusters. A abordagem aglomerativa começa com cada ponto como um cluster e, iterativamente, funde os clusters mais próximos até que reste apenas um.
+# 
+# O **Dendrograma** é uma visualização chave aqui. Ele mostra a hierarquia das fusões e a "distância" em que ocorreram. Podemos inspecioná-lo para decidir onde "cortar" a árvore e obter um número de clusters. Usaremos o método de ligação `ward`, que tende a encontrar clusters de variância similar.
+# 
+# Vamos gerar dendrogramas usando dois métodos de ligação diferentes:
+# 1.  **`ward`**: Minimiza a variância dentro dos clusters que são fundidos. Tende a encontrar clusters de tamanho similar e formato globular.
+# 2.  **`average`**: Usa a distância média entre todos os pares de pontos dos dois clusters sendo considerados para fusão. É menos sensível a outliers que o `complete` linkage.
+#%%
+print( "\n--- Clustering Hierárquico: Dendrogramas ---" )
+
+if 'X_scaled_clustering' in locals():
+    linkage_methods_to_test = [ 'ward', 'average' ]
+
+    for method in linkage_methods_to_test:
+        print( f"\nCalculando a matriz de ligação (linkage matrix) usando o método '{method}'..." )
+        try:
+            # 'ward' só funciona com métrica euclidiana (padrão)
+            # 'average' pode usar outras métricas, mas manteremos 'euclidean' por consistência
+            linkage_matrix = linkage( X_scaled_clustering, method = method, metric = 'euclidean' )
+
+            print( f"Gerando o Dendrograma para '{method}'..." )
+            plt.figure( figsize = (15, 7) )
+            dendrogram(
+                    linkage_matrix,
+                    truncate_mode = 'lastp',
+                    p = 12,
+                    leaf_rotation = 90.,
+                    leaf_font_size = 8.,
+                    show_contracted = True,
+            )
+            plt.title( f'Dendrograma Hierárquico (Método {method.capitalize()}, Truncado)' )
+            plt.xlabel( 'Índice da Amostra ou Tamanho do Cluster (entre parênteses)' )
+            plt.ylabel( f'Distância ({method.capitalize()})' )
+            plt.grid( axis = 'y' )
             plt.show()
 
-        else:
-            print( f"Não há dados válidos para plotar para a métrica '{metric}'." )
+        except Exception as e:
+            print( f"ERRO ao gerar dendrograma para o método '{method}': {e}" )
 
 else:
-    print( "Nenhum resultado de avaliação foi gerado. Verifique os loops de CV." )
+    print( "ERRO: Dados escalados 'X_scaled_clustering' não disponíveis." )
+#%% md
+# **Interpretação dos Dendrogramas:** Compare os dois gráficos. O método `ward` geralmente produz clusters mais balanceados em tamanho. O método `average` pode ser influenciado de forma diferente pela estrutura dos dados. Veja se ambos apontam para um número similar de clusters ao fazer o "corte" horizontal imaginário nas regiões de maior distância vertical.
+# 
+# Vamos agora aplicar o Clustering Hierárquico Aglomerativo com um número de clusters (`n_clusters`) escolhido (provavelmente `n_clusters=2`, como antes, mas sinta-se à vontade para mudar com base nos dendrogramas) para **ambos** os métodos de linkage (`ward` e `average`).
+#%%
+print( "\n--- Clustering Hierárquico: Aplicação Final (Ward e Average) ---" )
 
-#%% md
-# # **DÚVIDA: É NECESSÁRIO SEPARAR A BASE (TESTE/TREINO) ANTES DE REMOVER OUTLIERS?**
-#%% md
-# # **TESTE: REMOVENDO OUTLIERS. QUAL SERÁ O IMPACTO? COMPARAR DEPOIS!**
-#%% md
-# Análise: antes de remover os possíveis outliers, nossa base tinha 2587 linhas, após a remoção, ficou com 1202.
+chosen_n_clusters_h = 2
+
+if 'X_scaled_clustering' in locals():
+    linkage_methods_to_run = [ 'ward', 'average' ]
+    all_labels_added = True  # Flag para verificar se df_clustered existe
+
+    # Verificar se df_clustered existe para adicionar colunas
+    if 'df_clustered' not in locals():
+        print( "AVISO: DataFrame 'df_clustered' não encontrado. Criando um novo a partir de 'df'." )
+        try:
+            df_clustered = df.copy()
+        except NameError:
+            print( "ERRO: DataFrame 'df' original não encontrado. Não é possível armazenar resultados." )
+            all_labels_added = False
+
+    if all_labels_added:
+        for method in linkage_methods_to_run:
+            print( f"\nAplicando Clustering Hierárquico (Linkage='{method}', n_clusters={chosen_n_clusters_h})..." )
+            try:
+                # Instanciar e ajustar o modelo
+                agg_clustering = AgglomerativeClustering(
+                        n_clusters = chosen_n_clusters_h,
+                        metric = 'euclidean',
+                        linkage = method )
+                hierarchical_labels = agg_clustering.fit_predict( X_scaled_clustering )
+
+                # Adicionar rótulos ao DataFrame com nome específico do método
+                column_name = f'Hierarchical_Cluster_{method.capitalize()}'
+                df_clustered[ column_name ] = hierarchical_labels
+                print( f"Rótulos '{column_name}' adicionados ao DataFrame 'df_clustered'." )
+
+                # Mostrar contagem por cluster
+                print( f"\nContagem de amostras por Cluster (Linkage='{method}'):" )
+                print( pd.Series( hierarchical_labels ).value_counts().sort_index() )
+
+            except Exception as e:
+                print( f"ERRO ao aplicar clustering hierárquico com linkage='{method}': {e}" )
 else:
-    print( "Nenhum resultado de avaliação foi gerado. Verifique os loops de CV." )
+    print( "ERRO: Dados escalados 'X_scaled_clustering' não disponíveis." )
 
+# Exibir as primeiras linhas do DataFrame com os novos clusters (se foi criado)
+if 'df_clustered' in locals() and all_labels_added:
+    print( "\n--- DataFrame com Rótulos de Cluster (Primeiras Linhas) ---" )
+    df_clustered.head()
 #%% md
-# # **DÚVIDA: É NECESSÁRIO SEPARAR A BASE (TESTE/TREINO) ANTES DE REMOVER OUTLIERS?**
+# ## 2.3 Comparação dos Resultados de Clustering
+# 
+# Vamos agora calcular métricas para avaliar e comparar a qualidade dos agrupamentos obtidos com K-Means (k=2), Hierárquico Ward (n_clusters=2) e Hierárquico Average (n_clusters=2). Usaremos métricas internas (Silhouette, Davies-Bouldin, Calinski-Harabasz) que avaliam a estrutura dos clusters sem usar rótulos externos, e uma métrica externa (Adjusted Rand Index - ARI) para verificar o alinhamento com as classes originais BENIGN/MALIGNANT.
+#%%
+print( "--- Calculando Métricas de Avaliação de Clustering ---" )
+
+# Dicionário para armazenar os resultados das métricas
+clustering_metrics = { }
+
+try:
+    X_scaled_clustering  # Dados usados para o clustering
+    kmeans_labels  # Rótulos do K-Means
+    # Assumindo que as colunas foram adicionadas ao df_clustered:
+    hierarchical_labels_ward = df_clustered[ 'Hierarchical_Cluster_Ward' ]
+    hierarchical_labels_avg = df_clustered[ 'Hierarchical_Cluster_Average' ]
+    y_encoded
+
+    # Lista de resultados para comparar
+    results_clustering = [
+        { 'Algorithm': 'K-Means', 'Labels': kmeans_labels },
+        { 'Algorithm': 'Hierarchical Ward', 'Labels': hierarchical_labels_ward },
+        { 'Algorithm': 'Hierarchical Average', 'Labels': hierarchical_labels_avg },
+    ]
+
+except NameError as e:
+    print(
+            f"ERRO: Variável necessária não encontrada - {e}. Certifique-se que as células anteriores de clustering foram executadas." )
+except KeyError as e:
+    print( f"ERRO: Coluna de rótulo hierárquico não encontrada no DataFrame 'df_clustered': {e}" )
+
+# Calcular métricas para cada algoritmo
+print( "\nCalculando métricas..." )
+for result in results_clustering:
+    algo_name = result[ 'Algorithm' ]
+    labels = result[ 'Labels' ]
+    metrics = { 'Algorithm': algo_name }
+
+    # Verificar se há mais de 1 cluster e menos clusters que amostras (necessário para métricas)
+    n_clusters_found = len( np.unique( labels ) )
+    n_samples = len( labels )
+
+    if 1 < n_clusters_found < n_samples:
+        print( f"  - {algo_name} (Clusters={n_clusters_found})..." )
+        # Métricas Internas
+        try:
+            sil_score = silhouette_score( X_scaled_clustering, labels, metric = 'euclidean' )
+            metrics[ 'Silhouette Score (Maior Melhor)' ] = sil_score
+            print( f"    Silhouette: {sil_score:.4f}" )
+        except Exception as e_sil:
+            print( f"    ERRO Silhouette: {e_sil}" )
+            metrics[ 'Silhouette Score (Maior Melhor)' ] = np.nan
+
+        try:
+            db_score = davies_bouldin_score( X_scaled_clustering, labels )
+            metrics[ 'Davies-Bouldin (Menor Melhor)' ] = db_score
+            print( f"    Davies-Bouldin: {db_score:.4f}" )
+        except Exception as e_db:
+            print( f"    ERRO Davies-Bouldin: {e_db}" )
+            metrics[ 'Davies-Bouldin (Menor Melhor)' ] = np.nan
+
+        try:
+            ch_score = calinski_harabasz_score( X_scaled_clustering, labels )
+            metrics[ 'Calinski-Harabasz (Maior Melhor)' ] = ch_score
+            print( f"    Calinski-Harabasz: {ch_score:.1f}" )  # Score pode ser grande
+        except Exception as e_ch:
+            print( f"    ERRO Calinski-Harabasz: {e_ch}" )
+            metrics[ 'Calinski-Harabasz (Maior Melhor)' ] = np.nan
+
+        # Métrica Externa (comparação com y_encoded original)
+        try:
+            # Garantir que y_encoded tem o mesmo tamanho que labels
+            if len( y_encoded ) == len( labels ):
+                ari_score = adjusted_rand_score( y_encoded, labels )
+                metrics[ 'ARI (vs Original, Maior Melhor)' ] = ari_score
+                print( f"    Adjusted Rand Index (ARI): {ari_score:.4f}" )
+            else:
+                print( "    AVISO: Tamanho de y_encoded diferente dos labels. Pulando ARI." )
+                metrics[ 'ARI (vs Original, Maior Melhor)' ] = np.nan
+        except Exception as e_ari:
+            print( f"    ERRO ARI: {e_ari}" )
+            metrics[ 'ARI (vs Original, Maior Melhor)' ] = np.nan
+
+    else:
+        print( f"  - {algo_name}: Número inválido de clusters ({n_clusters_found}) para calcular métricas. Pulando." )
+        metrics.update(
+                {
+                    'Silhouette Score (Maior Melhor)': np.nan,
+                    'Davies-Bouldin (Menor Melhor)': np.nan,
+                    'Calinski-Harabasz (Maior Melhor)': np.nan,
+                    'ARI (vs Original, Maior Melhor)': np.nan
+                } )
+
+    clustering_metrics[ algo_name ] = metrics
+
+#%%
+# Organizar resultados em DataFrame
+if clustering_metrics:
+    metrics_df = pd.DataFrame.from_dict( clustering_metrics, orient = 'index' )
+    print( "\n--- Tabela Comparativa das Métricas de Clustering ---" )
+    print( metrics_df )
+else:
+    print( "\nNenhuma métrica de clustering foi calculada." )
 #%% md
-# # **TESTE: REMOVENDO OUTLIERS. QUAL SERÁ O IMPACTO? COMPARAR DEPOIS!**
+# ## 2.4 Análise Comparativa das Métricas de Clustering
+# 
+# Avaliamos os três algoritmos de clustering (K-Means, Hierárquico Ward, Hierárquico Average), provavelmente com 2 clusters cada, usando métricas internas e externas. Vamos analisar a tabela de resultados:
+# 
+# **Resumo das Métricas e Seus Significados:**
+# 
+# * **Silhouette Score:** Mede quão similar um ponto é ao seu cluster comparado a outros. **Maior é melhor** (máximo 1).
+# * **Davies-Bouldin:** Mede a similaridade média de cada cluster com seu vizinho mais próximo (considerando tamanho e distância). **Menor é melhor** (mínimo 0).
+# * **Calinski-Harabasz:** Mede a razão entre a dispersão entre clusters e a dispersão intra-cluster. **Maior é melhor**.
+# * **Adjusted Rand Index (ARI):** Mede a similaridade entre os clusters encontrados e os rótulos de classe originais (BENIGN/MALIGNANT), ajustado para o acaso. **Maior é melhor** (máximo 1) para indicar alinhamento com as classes originais.
+# 
+# **Análise dos Resultados:**
+# 
+# 1.  **Silhouette Score:**
+#     * **Hierarchical Ward (0.4533)** foi o claro vencedor, indicando a melhor combinação de coesão (pontos próximos dentro do cluster) e separação (clusters distantes entre si).
+#     * Hierarchical Average (0.3744) foi o segundo.
+#     * K-Means (0.1479) teve um desempenho significativamente pior, sugerindo clusters mais sobrepostos ou mal definidos por esta métrica.
+# 
+# 2.  **Davies-Bouldin Index:**
+#     * **Hierarchical Average (0.1884)** foi **dramaticamente** melhor (menor) que os outros dois. Isso sugere que, por este critério, ele criou clusters muito compactos em relação à distância para o cluster mais próximo.
+#     * K-Means (1.3689) e Hierarchical Ward (1.4115) tiveram scores muito altos (ruins) nesta métrica, indicando baixa qualidade segundo este critério específico.
+# 
+# 3.  **Calinski-Harabasz Index:**
+#     * **Hierarchical Ward (530.1)** foi novamente o vencedor, indicando a maior razão entre variância inter-cluster e intra-cluster.
+#     * K-Means (294.9) ficou em segundo.
+#     * Hierarchical Average (186.4) teve o pior desempenho nesta métrica.
+# 
+# 4.  **Adjusted Rand Index (ARI):**
+#     * Todos os algoritmos tiveram scores **extremamente baixos**, muito próximos de 0 (Hierarchical Average: 0.0060, K-Means: 0.0010, Hierarchical Ward: -0.0037).
+#     * Isso indica que **nenhum dos agrupamentos encontrados tem correspondência significativa com as classes originais** (BENIGN/MALIGNANT). A estrutura que emerge dos dados radiômicos de forma não supervisionada parece ser independente da classificação diagnóstica final.
+# 
+# **Discussão e Conclusão:**
+# 
+# * **Conflito entre Métricas:** Há uma clara discordância entre as métricas internas. Silhouette e Calinski-Harabasz favorecem o **Hierarchical Ward**, sugerindo clusters bem separados e com boa relação de variância. Por outro lado, Davies-Bouldin favorece fortemente o **Hierarchical Average**, indicando clusters compactos em relação aos vizinhos. O K-Means não se destacou em nenhuma métrica interna.
+# * **Por que o Conflito?** Diferentes métricas "enxergam" a estrutura do cluster de formas distintas. O score muito baixo de Davies-Bouldin para 'Average' pode indicar que ele criou grupos muito pequenos e densos, mesmo que a separação geral (avaliada por Silhouette/Calinski) não seja a melhor, ou talvez uma estrutura de clusters menos globular que o 'Ward' não captura bem por essa métrica.
+# * **Melhor Algoritmo (Estrutura Interna):** Considerando que **duas das três métricas internas (Silhouette e Calinski-Harabasz) apontam para o Hierarchical Ward**, ele parece ser a escolha mais razoável se o objetivo é obter clusters com boa definição geral (densos internamente e bem separados externamente).
+# * **Relevância Clínica (ARI):** A análise não supervisionada não agrupou os dados de acordo com a classificação benigno/maligno. Isso é um achado importante: as características radiômicas, por si só, podem agrupar os casos de formas diferentes (talvez por textura, tamanho, localização, etc.) que não se correlacionam diretamente com o diagnóstico final por meio destes algoritmos e com k=2.
+# 
+# **Recomendação:**
+# 
+# Com base na concordância da maioria das métricas internas, **Hierarchical Ward** parece ter produzido a estrutura de cluster mais robusta. No entanto, devido ao resultado conflitante do Davies-Bouldin, **é altamente recomendável visualizar os clusters** gerados pelos três métodos (por exemplo, usando PCA ou t-SNE para reduzir para 2D e colorindo os pontos pelos rótulos de cada algoritmo) para entender visualmente as diferenças e confirmar qual estrutura faz mais sentido para os seus dados.
 #%% md
-# Análise: antes de remover os possíveis outliers, nossa base tinha 2587 linhas, após a remoção, ficou com 1202.
+# ## 2.5 Visualização dos Clusters (PCA 2D)
+# 
+# Como as métricas internas apresentaram resultados conflitantes (especialmente o Davies-Bouldin favorecendo 'Average', enquanto Silhouette e Calinski-Harabasz favoreceram 'Ward'), vamos visualizar os agrupamentos. Reduziremos a dimensionalidade dos dados (escalonados) para 2 Componentes Principais (PCA) e plotaremos os pontos, colorindo-os de acordo com os rótulos atribuídos por cada um dos três algoritmos de clustering (K-Means, Ward, Average). Isso nos ajudará a ter uma intuição visual sobre a estrutura e separação dos clusters encontrados por cada método.
+#%%
+print( "\n--- Visualizando os Clusters em 2D usando PCA ---" )
+
+# Garante que temos os dados escalados e o DataFrame com os rótulos dos clusters
+try:
+    X_scaled_clustering  # Dados escalados usados no clustering
+    df_clustered  # DataFrame contendo os rótulos
+
+    # Nomes das colunas onde os rótulos foram armazenados (verificar se estão corretos)
+    kmeans_col = 'KMeans_Cluster'
+    ward_col = 'Hierarchical_Cluster_Ward'
+    avg_col = 'Hierarchical_Cluster_Average'
+
+    assert kmeans_col in df_clustered.columns
+    assert ward_col in df_clustered.columns
+    assert avg_col in df_clustered.columns
+
+    # Verificar y_encoded se quisermos plotar classes originais
+    y_encoded
+
+    labels_available = True
+
+except NameError as e:
+    print( f"ERRO: Variável necessária não definida - {e}. Execute as células anteriores." )
+    labels_available = False
+except KeyError as e:
+    print( f"ERRO: Coluna de rótulo de cluster não encontrada em 'df_clustered': {e}. Verifique a execução anterior." )
+    labels_available = False
+except AssertionError as e:
+    print( f"ERRO: Coluna de rótulo de cluster faltando em 'df_clustered'. Verifique a execução anterior. {e}" )
+    labels_available = False
+#%%
+if labels_available:
+    print( "\nAplicando PCA para reduzir os dados escalados para 2 dimensões..." )
+    try:
+        pca_visual = PCA( n_components = 2, random_state = 42 )
+        # Aplicar PCA nos mesmos dados escalados usados para clustering
+        X_pca_visual = pca_visual.fit_transform( X_scaled_clustering )
+        print( f"PCA concluído. Shape dos dados reduzidos: {X_pca_visual.shape}" )
+        print( f"Variância explicada pelos 2 componentes: {pca_visual.explained_variance_ratio_.sum():.2%}" )
+
+        # Criar DataFrame para plotagem, usando o mesmo índice do df_clustered
+        df_pca_visual = pd.DataFrame( data = X_pca_visual, columns = [ 'PC1', 'PC2' ], index = df_clustered.index )
+
+        # Adicionar os rótulos dos clusters e a classe original
+        df_pca_visual[ 'KMeans' ] = df_clustered[ kmeans_col ]
+        df_pca_visual[ 'Ward' ] = df_clustered[ ward_col ]
+        df_pca_visual[ 'Average' ] = df_clustered[ avg_col ]
+        try:
+            if len( y_encoded ) == len( df_pca_visual ):
+                df_pca_visual[ 'Original_Class' ] = y_encoded
+                print( "Coluna 'Original_Class' adicionada para referência." )
+            else:
+                print( "AVISO: Não foi possível adicionar Original_Class (tamanho/índice)." )
+        except NameError:
+            pass  # Ignora se y_encoded não existir
+
+        pca_successful = True
+
+    except Exception as e:
+        print( f"ERRO durante a aplicação do PCA para visualização: {e}" )
+        pca_successful = False
+#%%
+if labels_available and pca_successful:
+    print( "\nGerando gráficos de dispersão (Clusters coloridos por algoritmo)..." )
+
+    cluster_methods_to_plot = { 'KMeans': kmeans_col, 'Ward': ward_col, 'Average': avg_col }
+    n_plots = len( cluster_methods_to_plot )
+
+    # Definir paleta de cores (ex: para 2 clusters)
+    # Garantir que temos cores suficientes se k for > 2
+    try:
+        num_actual_clusters = df_clustered[ kmeans_col ].nunique()  # Checa k usado
+        plot_palette = sns.color_palette( 'viridis', n_colors = num_actual_clusters )
+    except:
+        plot_palette = 'viridis'
+
+    plt.figure( figsize = (7 * n_plots, 6) )
+
+    plot_counter = 1
+    for method_name, label_col in cluster_methods_to_plot.items():
+        plt.subplot( 1, n_plots, plot_counter )
+        sns.scatterplot(
+                x = 'PC1', y = 'PC2',
+                hue = df_clustered[ label_col ],  # Usar a coluna correta do df_clustered
+                data = df_pca_visual,  # Usar os dados reduzidos pelo PCA
+                palette = plot_palette,
+                alpha = 0.7,
+                legend = 'full'
+        )
+        # Usar o nome do método no título
+        plt.title( f'Clusters por: {method_name}' )
+        plt.xlabel( 'Componente Principal 1 (PC1)' )
+        plt.ylabel( 'Componente Principal 2 (PC2)' )
+        plt.grid( True, alpha = 0.3 )
+        plot_counter += 1
+
+    plt.suptitle( 'Visualização 2D dos Clusters (PCA)', fontsize = 16, y = 1.03 )
+    plt.tight_layout( rect = [ 0, 0, 1, 0.98 ] )
+    plt.show()
+
+    # Plot: Colorido pelas Classes Originais (se disponíveis)
+    if 'Original_Class' in df_pca_visual.columns:
+        print( "\nGerando gráfico de dispersão colorido pelas classes originais (para referência)..." )
+        plt.figure( figsize = (7, 6) )
+        sns.scatterplot(
+                x = 'PC1', y = 'PC2',
+                hue = 'Original_Class',
+                data = df_pca_visual,
+                palette = 'coolwarm',
+                alpha = 0.7,
+                legend = 'full'
+        )
+        plt.title( 'Visualização 2D - Classes Originais (PCA)' )
+        plt.xlabel( 'Componente Principal 1 (PC1)' )
+        plt.ylabel( 'Componente Principal 2 (PC2)' )
+        plt.grid( True, alpha = 0.3 )
+        plt.tight_layout()
+        plt.show()
+
+else:
+    print( "\nNão foi possível gerar os gráficos de visualização devido a erros anteriores." )
